@@ -11,11 +11,9 @@ class DBManager:
         conn = sqlite3.connect(self.db_name)
         c = conn.cursor()
         
-        # 사용자 권한
         c.execute('''CREATE TABLE IF NOT EXISTS users
                      (user_id INTEGER PRIMARY KEY, username TEXT, role TEXT, joined_at TEXT)''')
         
-        # 회의록
         c.execute('''CREATE TABLE IF NOT EXISTS meetings
                      (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                       name TEXT, 
@@ -25,11 +23,9 @@ class DBManager:
                       summary TEXT,
                       jump_url TEXT)''')
 
-        # 레포지토리
         c.execute('''CREATE TABLE IF NOT EXISTS repositories
                      (repo_name TEXT PRIMARY KEY, channel_id INTEGER, added_by TEXT, date TEXT)''')
 
-        # 할 일 (source_meeting_id 추가)
         c.execute('''CREATE TABLE IF NOT EXISTS tasks
                      (task_id INTEGER PRIMARY KEY AUTOINCREMENT,
                       project_name TEXT,
@@ -40,14 +36,12 @@ class DBManager:
                       created_at TEXT,
                       source_meeting_id INTEGER)''')
         
-        # 마이그레이션: 기존 tasks 테이블에 source_meeting_id가 없으면 추가
+        # 마이그레이션 (기존 DB 호환용)
         try:
             c.execute("SELECT source_meeting_id FROM tasks LIMIT 1")
         except sqlite3.OperationalError:
-            try:
-                c.execute("ALTER TABLE tasks ADD COLUMN source_meeting_id INTEGER")
-            except:
-                pass # 테이블이 방금 생성된 경우
+            try: c.execute("ALTER TABLE tasks ADD COLUMN source_meeting_id INTEGER")
+            except: pass
 
         conn.commit()
         conn.close()
@@ -94,6 +88,16 @@ class DBManager:
         conn.commit()
         conn.close()
         return log_id
+
+    def delete_meeting(self, meeting_id):
+        """[NEW] 회의록 삭제"""
+        conn = sqlite3.connect(self.db_name)
+        c = conn.cursor()
+        c.execute("DELETE FROM meetings WHERE id = ?", (meeting_id,))
+        deleted = c.rowcount > 0
+        conn.commit()
+        conn.close()
+        return deleted
 
     def get_recent_meetings(self, limit=5):
         conn = sqlite3.connect(self.db_name)
@@ -177,12 +181,10 @@ class DBManager:
     def update_task_status(self, task_id, status):
         conn = sqlite3.connect(self.db_name)
         c = conn.cursor()
-        # 해당 태스크가 존재하는지 먼저 확인
         c.execute("SELECT task_id FROM tasks WHERE task_id = ?", (task_id,))
         if not c.fetchone():
             conn.close()
             return False
-            
         c.execute("UPDATE tasks SET status = ? WHERE task_id = ?", (status, task_id))
         conn.commit()
         conn.close()
