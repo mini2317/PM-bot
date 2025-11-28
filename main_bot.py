@@ -384,6 +384,7 @@ async def process_webhook_payload(data):
 
         # 4. [수정] Diff 가져오기 (API URL 생성)
         api_url = f"https://api.github.com/repos/{repo_name}/commits/{commit_id}"
+        print(api_url)
         
         diff_text = await get_github_diff(api_url)
         
