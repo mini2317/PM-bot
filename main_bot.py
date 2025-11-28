@@ -301,23 +301,45 @@ async def delete_meeting(ctx, m_id: int):
 # ==================================================================
 async def get_github_diff(api_url):
     """
-    [수정] Webhook의 HTML URL이 아닌, 정확한 API URL로 요청합니다.
-    URL Format: https://api.github.com/repos/{owner}/{repo}/commits/{sha}
+    [개선된 Diff 로직]
+    1. 노이즈 파일(lock파일, 이미지 등) 제외
+    2. 파일별 길이 제한 적용 (특정 파일이 너무 크면 앞부분만 전송)
+    3. 전체 Diff 텍스트 생성
     """
     print(f"DEBUG: Diff 요청 API URL: {api_url}")
     async with aiohttp.ClientSession() as session:
-        # API 요청 시에는 꼭 API 토큰과 Accept 헤더를 포함해야 합니다.
         async with session.get(api_url, headers=github_headers) as resp:
             if resp.status == 200:
                 data = await resp.json()
-                diff_text = ""
-                # API 응답의 'files' 리스트에서 'patch'를 추출합니다.
+                diff_lines = []
+                
+                # 무시할 파일 및 확장자
+                ignored_files = ['package-lock.json', 'yarn.lock', 'poetry.lock', 'Gemfile.lock']
+                ignored_exts = ('.svg', '.png', '.jpg', '.jpeg', '.gif', '.ico', '.pdf')
+
                 for file in data.get('files', []):
                     filename = file['filename']
-                    # patch가 없는 경우(이미지/바이너리 파일 등) 처리
-                    patch = file.get('patch', '(Binary or Large file - No diff available)')
-                    diff_text += f"📄 File: {filename}\n{patch}\n\n"
-                return diff_text
+                    
+                    # 1. 노이즈 필터링
+                    if filename in ignored_files or filename.endswith(ignored_exts):
+                        diff_lines.append(f"📄 File: {filename} (Skipped: Auto-generated/Asset)")
+                        continue
+
+                    # 2. Patch(Diff) 유무 확인
+                    # GitHub API는 너무 큰 파일의 patch는 보내지 않습니다.
+                    patch = file.get('patch', None)
+                    if not patch:
+                        diff_lines.append(f"📄 File: {filename} (Skipped: Binary or Too Large)")
+                        continue
+                    
+                    # 3. 파일별 길이 제한 (예: 2500자)
+                    # 한 파일이 너무 길면 잘라서 다른 파일들의 내용도 담을 수 있게 합니다.
+                    if len(patch) > 2500:
+                        patch = patch[:2500] + "\n... (Diff truncated due to length) ..."
+                    
+                    diff_lines.append(f"📄 File: {filename}\n{patch}\n")
+                
+                return "\n".join(diff_lines)
             else:
                 print(f"DEBUG: API 요청 실패 code={resp.status}")
                 return None
@@ -361,17 +383,15 @@ async def process_webhook_payload(data):
         await channel.send(msg)
 
         # 4. [수정] Diff 가져오기 (API URL 생성)
-        # Webhook에 있는 'url'은 사람이 보는 페이지이므로, API URL을 직접 조립해야 함.
-        # 형식: https://api.github.com/repos/{repo_name}/commits/{commit_id}
         api_url = f"https://api.github.com/repos/{repo_name}/commits/{commit_id}"
         
         diff_text = await get_github_diff(api_url)
         
         if diff_text:
+            # AI에게 압축/정제된 Diff 전송
             review_result = await ai.review_code(repo_name, author, message, diff_text)
             
-            # [수정] 리뷰 결과 페이지네이션 처리
-            # 1000자 단위로 잘라서 여러 개의 Embed 생성
+            # 리뷰 결과 페이지네이션 처리
             chunks = [review_result[i:i+1000] for i in range(0, len(review_result), 1000)]
             embeds = []
             
