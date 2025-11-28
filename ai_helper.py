@@ -11,21 +11,29 @@ class AIHelper:
         else:
             self.model = None
 
-    async def generate_meeting_summary(self, transcript):
-        """[변경] 제목과 회의록을 함께 생성"""
+    async def generate_meeting_summary(self, formatted_transcript):
+        """
+        [변경] 구조화된 대화 로그를 기반으로 요약 및 제목 생성
+        formatted_transcript 예시:
+        [Speaker: 홍길동 | Time: 12:00] 안녕하세요
+        [Speaker: 김철수 | Time: 12:01] 반갑습니다
+        """
         if not self.model: return "제목: 알 수 없음\n\nAPI 키가 없습니다."
 
         prompt = f"""
-        [대화 스크립트]:
-        {transcript}
+        당신은 전문 프로젝트 매니저(PM)입니다. 
+        아래 제공되는 회의 대화 로그는 `[Speaker: 이름 | Time: 시간] 발언 내용` 형식으로 구조화되어 있습니다.
+        이 정보를 바탕으로 **누가 어떤 의견을 냈는지** 맥락을 정확히 파악하여 회의록을 작성하세요.
 
-        위 내용을 분석해서 **가장 적절한 '회의 제목'**과 **'회의록'**을 작성해줘.
-        
-        [출력 형식]
-        반드시 첫 번째 줄은 "제목: [AI가 추천하는 제목]" 형식으로 시작해야 해.
-        그 다음 줄부터 회의록 내용을 작성해.
+        [대화 로그]:
+        {formatted_transcript}
 
-        [예시]
+        [요청 사항]
+        1. **가장 적절한 '회의 제목'**을 첫 줄에 작성하세요. (형식: "제목: [제목내용]")
+        2. 그 다음 줄부터 **회의록**을 작성하세요.
+        3. 요약 시, 중요한 결정 사항에는 발언자 이름을 괄호 안에 명시하세요. 예: "API 스펙 확정 (김철수)"
+
+        [출력 예시]
         제목: 11월 4주차 로그인 API 설계 회의
         
         # 📅 회의록
@@ -38,18 +46,18 @@ class AIHelper:
         except Exception as e:
             return f"제목: 에러 발생\n\n오류 내용: {e}"
 
-    async def extract_tasks_from_meeting(self, transcript):
-        """회의록에서 할 일(Action Items)을 JSON으로 추출"""
+    async def extract_tasks_from_meeting(self, formatted_transcript):
+        """구조화된 로그에서 할 일 추출"""
         if not self.model: return []
 
         prompt = f"""
         아래 회의 대화 내용을 분석해서 '할 일(Action Items)'을 추출해줘.
-        반드시 **JSON 리스트 형식**으로만 출력해. 설명이나 마크다운 없이 순수 JSON만 줘.
+        대화는 `[Speaker: 이름]` 형식으로 구분되어 있으니, 이를 참고하여 **담당자(assignee_hint)**를 최대한 추론해줘.
         
-        [대화 내용]:
-        {transcript}
+        [대화 로그]:
+        {formatted_transcript}
 
-        [출력 예시]:
+        [출력 형식]: JSON 리스트만 출력 (마크다운 없이).
         [
             {{"content": "로그인 페이지 UI 디자인", "assignee_hint": "김철수"}},
             {{"content": "API 명세서 작성", "assignee_hint": ""}}
@@ -67,16 +75,15 @@ class AIHelper:
             print(f"Task Extraction Error: {e}")
             return []
 
-    async def review_code(self, repo_full_name, author, message, diff_text):
+    async def review_code(self, repo, author, msg, diff):
         if not self.model: return "❌ API Key Missing"
         prompt = f"""
-        GitHub 커밋 코드 리뷰 요청.
-        Repo: {repo_full_name}, Author: {author}, Msg: {message}
-        Diff: {diff_text[:15000]} 
-        한국어로 1. 의도 2. 버그점검 3. 개선안 제안해줘.
+        GitHub Code Review.
+        Repo: {repo}, Author: {author}, Msg: {msg}
+        Diff: {diff[:15000]}
+        Language: Korean. Check intent, bugs, and improvements.
         """
         try:
             response = await asyncio.to_thread(self.model.generate_content, prompt)
             return response.text
-        except Exception as e:
-            return f"리뷰 생성 실패: {e}"
+        except: return "Error generating review."
