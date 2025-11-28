@@ -53,7 +53,7 @@ github_headers = {
 # ==================================================================
 class EmbedPaginator(View):
     def __init__(self, embeds):
-        super().__init__(timeout=120) # [수정] 타임아웃 2분으로 연장
+        super().__init__(timeout=120) 
         self.embeds = embeds
         self.current_page = 0
         self.update_buttons()
@@ -118,17 +118,18 @@ async def remove_auth_user(ctx, member: discord.Member):
 @check_permission()
 async def add_repo(ctx, repo_name: str):
     if db.add_repo(repo_name, ctx.channel.id, ctx.author.name):
-        await ctx.send(f"✅ **{repo_name}** → <#{ctx.channel.id}> 연결 성공.")
+        await ctx.send(f"✅ **{repo_name}** → <#{ctx.channel.id}> 연결 성공.\n(이미 등록된 레포라면 이 채널에도 추가되었습니다)")
     else:
         await ctx.send("❌ 등록 실패.")
 
 @bot.command(name="레포삭제")
 @check_permission()
 async def remove_repo(ctx, repo_name: str):
-    if db.remove_repo(repo_name):
-        await ctx.send(f"🗑️ **{repo_name}** 연결 해제.")
+    # [변경] 현재 채널 ID를 함께 전달하여 해당 채널 연결만 해제
+    if db.remove_repo(repo_name, ctx.channel.id):
+        await ctx.send(f"🗑️ **{repo_name}** 이 채널에서의 연결 해제.")
     else:
-        await ctx.send("❌ 미등록 레포.")
+        await ctx.send("❌ 이 채널에 등록되지 않은 레포입니다.")
 
 @bot.command(name="레포목록")
 @check_permission()
@@ -286,7 +287,6 @@ async def view_meeting(ctx, m_id: int):
         return
     name, date, summary, link = row
     
-    # [수정] 회의록 내용 페이지네이션 처리
     chunks = []
     current_chunk = ""
     
@@ -330,15 +330,9 @@ async def delete_meeting(ctx, m_id: int):
         await ctx.send("❌ 삭제 실패 (존재하지 않거나 권한 없음).")
 
 # ==================================================================
-# [9. Github Webhook & Code Review (수정됨)]
+# [9. Github Webhook & Code Review]
 # ==================================================================
 async def get_github_diff(api_url):
-    """
-    [개선된 Diff 로직]
-    1. 노이즈 파일(lock파일, 이미지 등) 제외
-    2. 파일별 길이 제한 적용 (특정 파일이 너무 크면 앞부분만 전송)
-    3. 전체 Diff 텍스트 생성
-    """
     print(f"DEBUG: Diff 요청 API URL: {api_url}")
     async with aiohttp.ClientSession() as session:
         async with session.get(api_url, headers=github_headers) as resp:
@@ -346,27 +340,21 @@ async def get_github_diff(api_url):
                 data = await resp.json()
                 diff_lines = []
                 
-                # 무시할 파일 및 확장자
                 ignored_files = ['package-lock.json', 'yarn.lock', 'poetry.lock', 'Gemfile.lock']
                 ignored_exts = ('.svg', '.png', '.jpg', '.jpeg', '.gif', '.ico', '.pdf')
 
                 for file in data.get('files', []):
                     filename = file['filename']
                     
-                    # 1. 노이즈 필터링
                     if filename in ignored_files or filename.endswith(ignored_exts):
                         diff_lines.append(f"📄 File: {filename} (Skipped: Auto-generated/Asset)")
                         continue
 
-                    # 2. Patch(Diff) 유무 확인
-                    # GitHub API는 너무 큰 파일의 patch는 보내지 않습니다.
                     patch = file.get('patch', None)
                     if not patch:
                         diff_lines.append(f"📄 File: {filename} (Skipped: Binary or Too Large)")
                         continue
                     
-                    # 3. 파일별 길이 제한 (예: 2500자)
-                    # 한 파일이 너무 길면 잘라서 다른 파일들의 내용도 담을 수 있게 합니다.
                     if len(patch) > 2500:
                         patch = patch[:2500] + "\n... (Diff truncated due to length) ..."
                     
@@ -380,24 +368,22 @@ async def get_github_diff(api_url):
 async def process_webhook_payload(data):
     if 'repository' not in data: return
     
-    # 1. 정보 추출
-    repo_name = data['repository']['full_name'] # 예: mini2317/PM-bot
+    repo_name = data['repository']['full_name']
     
-    target_channel_id = db.get_repo_channel(repo_name)
-    if not target_channel_id:
+    # [변경] 모든 연결된 채널 가져오기
+    target_channel_ids = db.get_repo_channels(repo_name) # Returns list
+    if not target_channel_ids:
         print(f"DEBUG: 알 수 없는 레포지토리: {repo_name}")
         return
     
-    channel = bot.get_channel(target_channel_id)
-    if not channel: return
-
+    # 연결된 채널이 있으면 커밋/리뷰 데이터를 준비
     commits = data.get('commits', [])
     if not commits: return
 
     for commit in commits:
         author = commit['author']['name']
         message = commit['message']
-        web_url = commit['url'] 
+        web_url = commit['url']
         commit_id = commit['id']
         short_id = commit_id[:7]
 
@@ -408,34 +394,29 @@ async def process_webhook_payload(data):
             if db.update_task_status(int(t_id), "DONE"):
                 closed_tasks.append(t_id)
 
-        # 3. 알림 메시지 (링크 포함)
-        msg = f"🚀 **Push** `{repo_name}`\nCommit: [`{short_id}`]({web_url}) by **{author}**\nMsg: `{message}`"
+        # 3. 알림 메시지 생성
+        msg_content = f"🚀 **Push** `{repo_name}`\nCommit: [`{short_id}`]({web_url}) by **{author}**\nMsg: `{message}`"
         if closed_tasks:
-            msg += f"\n✅ Closed: " + ", ".join([f"#{t}" for t in closed_tasks])
+            msg_content += f"\n✅ Closed: " + ", ".join([f"#{t}" for t in closed_tasks])
         
-        await channel.send(msg)
-
-        # 4. Diff 가져오기 (API URL 생성)
+        # 4. 리뷰 생성 (한 번만 생성해서 모든 채널에 뿌림)
         api_url = f"https://api.github.com/repos/{repo_name}/commits/{commit_id}"
-        
         diff_text = await get_github_diff(api_url)
         
+        review_embeds = []
         if diff_text:
             review_result = await ai.review_code(repo_name, author, message, diff_text)
             
-            # [수정] 리뷰 결과 페이지네이션 처리 (Markdown-aware Smart Chunking)
+            # 페이지네이션 Embed 생성
             chunks = []
             current_chunk = ""
             in_code_block = False
             code_block_lang = ""
 
             for line in review_result.split('\n'):
-                # 1. 길이 체크 (1500자 제한, 닫는 펜스 여유분 포함)
                 if len(current_chunk) + len(line) + 10 > 1500:
                     if in_code_block:
-                        # 코드 블록 내부라면 닫아주고 청크 종료
                         chunks.append(current_chunk + "\n```")
-                        # 다음 청크는 해당 언어로 다시 열기
                         current_chunk = f"```{code_block_lang}\n{line}"
                     else:
                         chunks.append(current_chunk)
@@ -446,7 +427,6 @@ async def process_webhook_payload(data):
                     else:
                         current_chunk = line
                 
-                # 2. 코드 블록 상태 추적
                 stripped = line.strip()
                 if stripped.startswith("```"):
                     if in_code_block:
@@ -454,27 +434,35 @@ async def process_webhook_payload(data):
                         code_block_lang = ""
                     else:
                         in_code_block = True
-                        # ```python 등 언어 정보 추출
                         code_block_lang = stripped.replace("```", "").strip()
             
             if current_chunk:
                 chunks.append(current_chunk)
             
-            embeds = []
             for i, chunk in enumerate(chunks):
                 embed = discord.Embed(title=f"🤖 Code Review ({short_id})", url=web_url, color=0x2ecc71)
                 embed.description = chunk
                 if len(chunks) > 1:
                     embed.set_footer(text=f"Page {i+1}/{len(chunks)}")
-                embeds.append(embed)
+                review_embeds.append(embed)
+
+        # 5. [핵심] 모든 채널에 전송
+        for channel_id in target_channel_ids:
+            channel = bot.get_channel(channel_id)
+            if not channel: continue
             
-            if len(embeds) > 1:
-                view = EmbedPaginator(embeds)
-                await channel.send(embed=embeds[0], view=view)
-            else:
-                await channel.send(embed=embeds[0])
-        else:
-            print("DEBUG: Diff 텍스트를 가져오지 못했습니다.")
+            try:
+                await channel.send(msg_content)
+                
+                if review_embeds:
+                    if len(review_embeds) > 1:
+                        # 뷰는 채널마다 새로 생성해야 함 (상호작용을 위해)
+                        view = EmbedPaginator(review_embeds)
+                        await channel.send(embed=review_embeds[0], view=view)
+                    else:
+                        await channel.send(embed=review_embeds[0])
+            except Exception as e:
+                print(f"DEBUG: 채널 {channel_id} 전송 실패: {e}")
 
 async def webhook_handler(request):
     if request.method == 'GET':
@@ -518,7 +506,7 @@ COMMAND_INFO = {
         "usage": "!레포등록 [Owner/Repo]",
         "ex": "!레포등록 google/guava"
     },
-    "레포삭제": {"desc": "레포지토리 연결을 해제합니다.", "usage": "!레포삭제 [Owner/Repo]", "ex": "!레포삭제 google/guava"},
+    "레포삭제": {"desc": "현재 채널에서 레포지토리 연결을 해제합니다.", "usage": "!레포삭제 [Owner/Repo]", "ex": "!레포삭제 google/guava"},
     "레포목록": {"desc": "현재 연결된 레포지토리 목록을 봅니다.", "usage": "!레포목록", "ex": "!레포목록"},
 
     # 👑 권한 관리
