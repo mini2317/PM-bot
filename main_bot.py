@@ -8,6 +8,7 @@ import asyncio
 import re
 from database import DBManager
 from ai_helper import AIHelper
+import datetime
 
 # ==================================================================
 # [1. 설정 및 키 로드]
@@ -192,19 +193,23 @@ async def assign_task_cmd(ctx, task_id: int, member: discord.Member):
 # ==================================================================
 @bot.command(name="회의시작")
 @check_permission()
-async def start_meeting(ctx, *, meeting_name: str):
+async def start_meeting(ctx, *, meeting_name: str = None):
+    """[변경] 제목을 입력하지 않아도 자동 시작"""
     if ctx.channel.id in meeting_buffer:
-        await ctx.send("🔴 이미 회의가 진행 중입니다.")
+        await ctx.send("🔴 이미 이 채널에서 회의가 진행 중입니다.")
         return
+    
+    # 제목이 없으면 임시 제목 생성
+    if not meeting_name:
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+        meeting_name = f"{now} 회의 (진행 중)"
     
     meeting_buffer[ctx.channel.id] = {'name': meeting_name, 'messages': [], 'jump_url': ctx.message.jump_url}
     
-    # [강화된 Embed]
-    embed = discord.Embed(title=f"🎙️ 회의 시작: {meeting_name}", color=0xe74c3c) # Red for Recording
-    embed.add_field(name="상태", value="🔴 녹음 중 (Recording...)", inline=True)
-    embed.add_field(name="주최자", value=ctx.author.display_name, inline=True)
-    embed.add_field(name="안내", value="회의가 끝나면 `!회의종료`를 입력하세요.", inline=False)
-    embed.set_footer(text="모든 대화 내용이 AI 요약을 위해 기록됩니다.")
+    embed = discord.Embed(title=f"🎙️ 회의 시작", color=0xe74c3c)
+    embed.add_field(name="임시 제목", value=meeting_name, inline=True)
+    embed.add_field(name="안내", value="종료 시 AI가 내용을 분석해 **제목을 자동으로 수정**합니다.", inline=False)
+    embed.set_footer(text="!회의종료 입력 시 자동 저장됩니다.")
     
     await ctx.send(embed=embed)
 
@@ -217,19 +222,30 @@ async def stop_meeting(ctx):
 
     data = meeting_buffer.pop(ctx.channel.id)
     transcript = "\n".join(data['messages'])
-    meeting_name = data['name']
     
     if not transcript:
         await ctx.send("📝 대화 내용이 없어 저장하지 않습니다.")
         return
 
-    waiting = await ctx.send("🤖 회의 내용을 분석하고 할 일을 추출 중입니다...")
+    waiting = await ctx.send("🤖 AI가 회의를 분석하고 제목을 짓고 있습니다...")
 
-    # AI 처리
-    summary = await ai.generate_meeting_summary(meeting_name, transcript)
-    m_id = db.save_meeting(meeting_name, ctx.channel.id, transcript, summary, data['jump_url'])
-    extracted_tasks = await ai.extract_tasks_from_meeting(transcript)
+    # [변경] AI에게 제목과 내용을 함께 요청
+    full_result = await ai.generate_meeting_summary(transcript)
     
+    # 결과 파싱 (제목: ... 분리)
+    lines = full_result.strip().split('\n')
+    if lines[0].startswith("제목:"):
+        final_title = lines[0].replace("제목:", "").strip()
+        summary_body = "\n".join(lines[1:]).strip()
+    else:
+        final_title = f"{datetime.datetime.now().strftime('%Y-%m-%d')} 회의"
+        summary_body = full_result
+
+    # [변경] 저장 시 guild_id 포함
+    m_id = db.save_meeting(ctx.guild.id, final_title, ctx.channel.id, transcript, summary_body, data['jump_url'])
+    
+    # 할 일 추출
+    extracted_tasks = await ai.extract_tasks_from_meeting(transcript)
     task_text = ""
     for task in extracted_tasks:
         content = task.get('content', '내용 없음')
@@ -238,39 +254,38 @@ async def stop_meeting(ctx):
 
     await waiting.delete()
 
-    # [강화된 Embed]
-    embed = discord.Embed(title=f"✅ 회의 종료: {meeting_name}", color=0x2ecc71) # Green for Done
-    embed.add_field(name="📄 요약본(일부)", value=summary[:500] + ("..." if len(summary)>500 else ""), inline=False)
+    embed = discord.Embed(title=f"✅ 회의 종료: {final_title}", color=0x2ecc71)
+    embed.add_field(name="📄 요약본", value=summary_body[:500] + ("..." if len(summary_body)>500 else ""), inline=False)
     
     if task_text:
         embed.add_field(name="⚡ 도출된 Action Items", value=task_text, inline=False)
-    else:
-        embed.add_field(name="⚡ Action Items", value="도출된 할 일이 없습니다.", inline=False)
-        
-    embed.add_field(name="관리", value=f"ID: `{m_id}` | `!회의조회 {m_id}` 로 전체 보기", inline=False)
+    
+    embed.add_field(name="관리", value=f"ID: `{m_id}` | `!회의조회 {m_id}`", inline=False)
     
     await ctx.send(embed=embed)
 
 @bot.command(name="회의목록")
 @check_permission()
 async def list_meetings(ctx):
-    rows = db.get_recent_meetings()
+    # [변경] guild_id를 전달해 해당 서버 회의만 조회
+    rows = db.get_recent_meetings(ctx.guild.id)
     if not rows:
-        await ctx.send("📭 저장된 회의록이 없습니다.")
+        await ctx.send("📭 이 서버에는 저장된 회의록이 없습니다.")
         return
-    embed = discord.Embed(title="📂 최근 회의록", color=0xf1c40f)
+    embed = discord.Embed(title=f"📂 {ctx.guild.name} 회의록 목록", color=0xf1c40f)
     for row in rows:
         m_id, name, date, summary, link = row
-        val = f"📅 {date} | 🔗 [이동]({link})\n📝 {summary.splitlines()[0][:30]}..."
+        val = f"📅 {date} | 🔗 [이동]({link})\n📝 {summary.splitlines()[0][:30]}..." if summary else "요약 없음"
         embed.add_field(name=f"ID [{m_id}] {name}", value=val, inline=False)
     await ctx.send(embed=embed)
 
 @bot.command(name="회의조회")
 @check_permission()
 async def view_meeting(ctx, m_id: int):
-    row = db.get_meeting_detail(m_id)
+    # [변경] guild_id 전달
+    row = db.get_meeting_detail(m_id, ctx.guild.id)
     if not row:
-        await ctx.send("❌ 없음")
+        await ctx.send("❌ 해당 ID의 회의록이 없거나 이 서버의 회의가 아닙니다.")
         return
     name, date, summary, _, link = row
     msg = f"**📂 {name} ({date})**\n🔗 [이동]({link})\n\n{summary}"
@@ -279,17 +294,11 @@ async def view_meeting(ctx, m_id: int):
 @bot.command(name="회의삭제")
 @check_permission()
 async def delete_meeting(ctx, m_id: int):
-    """[NEW] 회의록 삭제 기능"""
-    row = db.get_meeting_detail(m_id)
-    if not row:
-        await ctx.send("❌ 해당 ID의 회의록이 없습니다.")
-        return
-    
-    if db.delete_meeting(m_id):
-        await ctx.send(f"🗑️ 회의록 **#{m_id} ({row[0]})** 삭제 완료.")
+    # [변경] guild_id 전달
+    if db.delete_meeting(m_id, ctx.guild.id):
+        await ctx.send(f"🗑️ 회의록 **#{m_id}** 삭제 완료.")
     else:
-        await ctx.send("❌ 삭제 실패.")
-
+        await ctx.send("❌ 삭제 실패 (존재하지 않거나 권한 없음).")
 # ==================================================================
 # [9. Github Webhook]
 # ==================================================================
