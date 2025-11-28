@@ -364,7 +364,7 @@ async def process_webhook_payload(data):
     for commit in commits:
         author = commit['author']['name']
         message = commit['message']
-        web_url = commit['url'] # 사용자에게 보여줄 클릭용 링크 (github.com/...)
+        web_url = commit['url'] # 사용자에게 보여줄 클릭용 링크 ([github.com/](https://github.com/)...)
         commit_id = commit['id']
         short_id = commit_id[:7]
 
@@ -383,18 +383,30 @@ async def process_webhook_payload(data):
         await channel.send(msg)
 
         # 4. [수정] Diff 가져오기 (API URL 생성)
-        api_url = f"https://api.github.com/repos/{repo_name}/commits/{commit_id}"
+        api_url = f"[https://api.github.com/repos/](https://api.github.com/repos/){repo_name}/commits/{commit_id}"
         
         diff_text = await get_github_diff(api_url)
         
         if diff_text:
-            # AI에게 압축/정제된 Diff 전송
             review_result = await ai.review_code(repo_name, author, message, diff_text)
             
-            # 리뷰 결과 페이지네이션 처리
-            chunks = [review_result[i:i+1000] for i in range(0, len(review_result), 1000)]
-            embeds = []
+            chunks = []
+            current_chunk = ""
             
+            for line in review_result.split('\n'):
+                if len(current_chunk) + len(line) + 1 > 1500:
+                    chunks.append(current_chunk)
+                    current_chunk = line
+                else:
+                    if current_chunk:
+                        current_chunk += "\n" + line
+                    else:
+                        current_chunk = line
+            
+            if current_chunk:
+                chunks.append(current_chunk)
+            
+            embeds = []
             for i, chunk in enumerate(chunks):
                 embed = discord.Embed(title=f"🤖 Code Review ({short_id})", url=web_url, color=0x2ecc71)
                 embed.description = chunk
