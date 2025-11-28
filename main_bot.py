@@ -312,6 +312,8 @@ async def get_github_diff(api_url):
                 data = await resp.json()
                 diff_text = ""
                 # API 응답의 'files' 리스트에서 'patch'를 추출합니다.
+                print(data)
+                print(data.get('files', []))
                 for file in data.get('files', []):
                     filename = file['filename']
                     # patch가 없는 경우(이미지/바이너리 파일 등) 처리
