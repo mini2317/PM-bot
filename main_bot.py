@@ -51,7 +51,7 @@ github_headers = {
 # ==================================================================
 # [3. UI 클래스 (페이지네이션)]
 # ==================================================================
-class HelpPaginator(View):
+class EmbedPaginator(View):
     def __init__(self, embeds):
         super().__init__(timeout=60)
         self.embeds = embeds
@@ -369,13 +369,24 @@ async def process_webhook_payload(data):
         
         if diff_text:
             review_result = await ai.review_code(repo_name, author, message, diff_text)
-            embed = discord.Embed(title=f"🤖 Code Review ({short_id})", url=web_url, color=0x2ecc71)
-            # 리뷰 내용이 길면 자름
-            if len(review_result) > 1024:
-                embed.description = review_result[:1020] + "..."
+            
+            # [수정] 리뷰 결과 페이지네이션 처리
+            # 1000자 단위로 잘라서 여러 개의 Embed 생성
+            chunks = [review_result[i:i+1000] for i in range(0, len(review_result), 1000)]
+            embeds = []
+            
+            for i, chunk in enumerate(chunks):
+                embed = discord.Embed(title=f"🤖 Code Review ({short_id})", url=web_url, color=0x2ecc71)
+                embed.description = chunk
+                if len(chunks) > 1:
+                    embed.set_footer(text=f"Page {i+1}/{len(chunks)}")
+                embeds.append(embed)
+            
+            if len(embeds) > 1:
+                view = EmbedPaginator(embeds)
+                await channel.send(embed=embeds[0], view=view)
             else:
-                embed.description = review_result
-            await channel.send(embed=embed)
+                await channel.send(embed=embeds[0])
         else:
             print("DEBUG: Diff 텍스트를 가져오지 못했습니다.")
 
@@ -462,7 +473,7 @@ async def help_cmd(ctx, cmd: str = None):
         embed3.add_field(name="!권한추가/삭제 [@멘션]", value="권한 부여/회수.", inline=False)
         embed3.set_footer(text="Page 3/3")
 
-        view = HelpPaginator([embed1, embed2, embed3])
+        view = EmbedPaginator([embed1, embed2, embed3])
         await ctx.send(embed=embed1, view=view)
 
 # ==================================================================
