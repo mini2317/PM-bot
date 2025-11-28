@@ -28,7 +28,9 @@ DISCORD_TOKEN = load_key("bot_token")
 GEMINI_API_KEY = load_key("gemini_key")
 GITHUB_TOKEN = load_key("github_key")
 
-TARGET_CHANNEL_ID = 123456789012345678 
+# 고정 채널 ID 제거 (DB에서 관리)
+# TARGET_CHANNEL_ID = ... 
+
 WEBHOOK_PORT = 8080 
 WEBHOOK_PATH = "/github-webhook"
 
@@ -63,6 +65,11 @@ class DBManager:
                       channel_id INTEGER, 
                       transcript TEXT, 
                       summary TEXT)''')
+
+        # 레포지토리 추적 테이블 (New)
+        # repo_name 예: "google/guava"
+        c.execute('''CREATE TABLE IF NOT EXISTS repositories
+                     (repo_name TEXT PRIMARY KEY, channel_id INTEGER, added_by TEXT, date TEXT)''')
         
         conn.commit()
         conn.close()
@@ -124,6 +131,48 @@ class DBManager:
         conn.close()
         return row
 
+    # --- 레포지토리 관리 메서드 ---
+    def add_repo(self, repo_name, channel_id, added_by):
+        conn = sqlite3.connect(self.db_name)
+        c = conn.cursor()
+        try:
+            date_str = datetime.datetime.now().strftime("%Y-%m-%d")
+            # 이미 있으면 업데이트 (채널 변경)
+            c.execute("INSERT OR REPLACE INTO repositories (repo_name, channel_id, added_by, date) VALUES (?, ?, ?, ?)",
+                      (repo_name, channel_id, added_by, date_str))
+            conn.commit()
+            return True
+        except Exception as e:
+            print(f"DB Error: {e}")
+            return False
+        finally:
+            conn.close()
+
+    def remove_repo(self, repo_name):
+        conn = sqlite3.connect(self.db_name)
+        c = conn.cursor()
+        c.execute("DELETE FROM repositories WHERE repo_name = ?", (repo_name,))
+        deleted = c.rowcount > 0
+        conn.commit()
+        conn.close()
+        return deleted
+
+    def get_repo_channel(self, repo_name):
+        conn = sqlite3.connect(self.db_name)
+        c = conn.cursor()
+        c.execute("SELECT channel_id FROM repositories WHERE repo_name = ?", (repo_name,))
+        result = c.fetchone()
+        conn.close()
+        return result[0] if result else None
+
+    def get_all_repos(self):
+        conn = sqlite3.connect(self.db_name)
+        c = conn.cursor()
+        c.execute("SELECT repo_name, channel_id FROM repositories")
+        rows = c.fetchall()
+        conn.close()
+        return rows
+
 db = DBManager()
 
 # ==================================================================
@@ -170,6 +219,12 @@ async def help_command(ctx):
         "`!회의목록` : 최근 저장된 회의록 리스트를 봅니다.\n"
         "`!회의조회 [ID]` : 특정 회의록의 상세 내용을 확인합니다."
     ), inline=False)
+
+    embed.add_field(name="🐙 Github 연동", value=(
+        "`!레포등록 [Owner/Repo]` : 현재 채널에 레포지토리 알림을 연결합니다.\n"
+        "`!레포삭제 [Owner/Repo]` : 레포지토리 연결을 해제합니다.\n"
+        "`!레포목록` : 연결된 레포지토리 목록을 확인합니다."
+    ), inline=False)
     
     embed.add_field(name="👑 관리자 전용", value=(
         "`!초기설정` : (최초 1회) 관리자를 등록합니다.\n"
@@ -215,6 +270,42 @@ async def remove_auth_user(ctx, member: discord.Member):
         await ctx.send(f"🗑️ {member.mention} 님의 권한이 회수되었습니다.")
     else:
         await ctx.send("❌ 해당 유저는 등록되어 있지 않습니다.")
+
+# ==================================================================
+# [레포지토리 관리 명령어]
+# ==================================================================
+@bot.command(name="레포등록")
+@check_permission()
+async def add_repo(ctx, repo_name: str):
+    """현재 채널에 Github 레포지토리를 연결합니다. (예: !레포등록 google/guava)"""
+    if db.add_repo(repo_name, ctx.channel.id, ctx.author.name):
+        await ctx.send(f"✅ **{repo_name}** 레포지토리가 이 채널(<#{ctx.channel.id}>)에 연결되었습니다.")
+    else:
+        await ctx.send("❌ 레포지토리 등록 실패.")
+
+@bot.command(name="레포삭제")
+@check_permission()
+async def remove_repo(ctx, repo_name: str):
+    """Github 레포지토리 연결을 해제합니다."""
+    if db.remove_repo(repo_name):
+        await ctx.send(f"🗑️ **{repo_name}** 레포지토리 연결이 해제되었습니다.")
+    else:
+        await ctx.send("❌ 등록되지 않은 레포지토리입니다.")
+
+@bot.command(name="레포목록")
+@check_permission()
+async def list_repos(ctx):
+    """등록된 레포지토리 목록을 보여줍니다."""
+    rows = db.get_all_repos()
+    if not rows:
+        await ctx.send("📭 등록된 레포지토리가 없습니다.")
+        return
+
+    embed = discord.Embed(title="🐙 연동된 레포지토리 목록", color=0x6e5494)
+    for repo, channel_id in rows:
+        embed.add_field(name=repo, value=f"📢 <#{channel_id}>", inline=False)
+    
+    await ctx.send(embed=embed)
 
 # ==================================================================
 # [회의록 시스템]
@@ -355,12 +446,21 @@ async def get_github_diff(commit_url):
 
 async def process_webhook_payload(data):
     """Webhook 데이터 처리 및 리뷰 트리거"""
-    if 'commits' not in data:
+    # 1. 커밋 데이터 확인
+    if 'commits' not in data or 'repository' not in data:
         return
 
-    channel = bot.get_channel(TARGET_CHANNEL_ID)
+    # 2. 레포지토리 정보 확인 및 타겟 채널 조회
+    repo_full_name = data['repository']['full_name'] # 예: "owner/repo"
+    target_channel_id = db.get_repo_channel(repo_full_name)
+
+    if not target_channel_id:
+        print(f"⚠️ 알림 스킵: 등록되지 않은 레포지토리 ({repo_full_name})")
+        return
+
+    channel = bot.get_channel(target_channel_id)
     if not channel:
-        print(f"Error: Target channel {TARGET_CHANNEL_ID} not found.")
+        print(f"❌ 오류: 채널 ID {target_channel_id}를 찾을 수 없습니다.")
         return
 
     for commit in data['commits']:
@@ -369,7 +469,7 @@ async def process_webhook_payload(data):
         url = commit['url']
         commit_id = commit['id'][:7]
 
-        await channel.send(f"🚀 **New Code Pushed!**\nCommit: `{commit_id}` by **{author}**\nMessage: `{message}`\nAI가 코드를 검토 중입니다...")
+        await channel.send(f"🚀 **New Code Pushed!**\nRepo: `{repo_full_name}`\nCommit: `{commit_id}` by **{author}**\nMessage: `{message}`\nAI가 코드를 검토 중입니다...")
 
         diff_text = await get_github_diff(url)
         
@@ -379,7 +479,7 @@ async def process_webhook_payload(data):
 
         prompt = f"""
         GitHub 커밋 코드 리뷰 요청.
-        [Commit Info] Author: {author}, Msg: {message}
+        [Commit Info] Repo: {repo_full_name}, Author: {author}, Msg: {message}
         [Code Diff]
         {diff_text[:15000]} 
 
@@ -423,6 +523,7 @@ async def start_web_server():
     site = web.TCPSite(runner, '0.0.0.0', WEBHOOK_PORT)
     await site.start()
     print(f"🌍 Webhook Server running on port {WEBHOOK_PORT}")
+    print(f"📢 GitHub Webhook Payload URL에 다음 경로를 추가하세요: [당신의_외부_IP_또는_도메인]{WEBHOOK_PATH}")
 
 @bot.event
 async def on_ready():
@@ -430,6 +531,8 @@ async def on_ready():
     if not DISCORD_TOKEN or not GEMINI_API_KEY:
         print("❌ CRITICAL: 키 파일 로드 실패. src/key 폴더를 확인하세요.")
         return
+    if not GITHUB_TOKEN:
+        print("⚠️ Warning: Github 키가 로드되지 않았습니다. AI 코드 리뷰 기능을 사용할 수 없습니다.")
     await start_web_server()
 
 if __name__ == "__main__":
