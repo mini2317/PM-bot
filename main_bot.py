@@ -225,7 +225,6 @@ async def stop_meeting(ctx):
         await ctx.send("📝 대화 내용이 없어 저장하지 않습니다.")
         return
 
-    # [중요] AI에게 보낼 구조화된 문자열 생성
     formatted_transcript = ""
     for msg in raw_messages:
         formatted_transcript += f"[Speaker: {msg['user']} | Time: {msg['time']}] {msg['content']}\n"
@@ -298,81 +297,91 @@ async def delete_meeting(ctx, m_id: int):
         await ctx.send("❌ 삭제 실패 (존재하지 않거나 권한 없음).")
 
 # ==================================================================
-# [9. Github Webhook & Code Review (상세 구현)]
+# [9. Github Webhook & Code Review (수정됨)]
 # ==================================================================
-async def get_github_diff(commit_url):
-    """Github API를 통해 커밋의 변경사항(Diff)을 가져옵니다."""
+async def get_github_diff(api_url):
+    """
+    [수정] Webhook의 HTML URL이 아닌, 정확한 API URL로 요청합니다.
+    URL Format: https://api.github.com/repos/{owner}/{repo}/commits/{sha}
+    """
+    print(f"DEBUG: Diff 요청 API URL: {api_url}")
     async with aiohttp.ClientSession() as session:
-        async with session.get(commit_url, headers=github_headers) as resp:
+        # API 요청 시에는 꼭 API 토큰과 Accept 헤더를 포함해야 합니다.
+        async with session.get(api_url, headers=github_headers) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 diff_text = ""
-                # 여러 파일의 Diff를 하나로 합침
+                # API 응답의 'files' 리스트에서 'patch'를 추출합니다.
                 for file in data.get('files', []):
-                    # 파일명과 패치 내용 저장
                     filename = file['filename']
-                    patch = file.get('patch', '(Binary or Large file)')
+                    # patch가 없는 경우(이미지/바이너리 파일 등) 처리
+                    patch = file.get('patch', '(Binary or Large file - No diff available)')
                     diff_text += f"📄 File: {filename}\n{patch}\n\n"
                 return diff_text
-            return None
+            else:
+                print(f"DEBUG: API 요청 실패 code={resp.status}")
+                return None
 
 async def process_webhook_payload(data):
-    """웹훅 데이터를 처리하고 코드 리뷰를 실행합니다."""
-    # 1. 필수 데이터 확인
     if 'repository' not in data: return
     
-    repo_name = data['repository']['full_name']
-    target_channel_id = db.get_repo_channel(repo_name)
+    # 1. 정보 추출
+    repo_name = data['repository']['full_name'] # 예: mini2317/PM-bot
     
+    target_channel_id = db.get_repo_channel(repo_name)
     if not target_channel_id:
-        print(f"DEBUG: 등록되지 않은 레포지토리 알림 ({repo_name})")
+        print(f"DEBUG: 알 수 없는 레포지토리: {repo_name}")
         return
     
     channel = bot.get_channel(target_channel_id)
     if not channel: return
 
-    # 2. 커밋 처리 루프
-    for commit in data.get('commits', []):
+    commits = data.get('commits', [])
+    if not commits: return
+
+    for commit in commits:
         author = commit['author']['name']
         message = commit['message']
-        url = commit['url']
-        commit_id = commit['id'][:7]
+        web_url = commit['url'] # 사용자에게 보여줄 클릭용 링크 (github.com/...)
+        commit_id = commit['id']
+        short_id = commit_id[:7]
 
-        # 3. Task 자동 완료 체크 (Fix #12)
+        # 2. Task 자동 완료
         closed_tasks = []
         matches = re.findall(r'(?:fix|close|resolve)\s*#(\d+)', message, re.IGNORECASE)
         for t_id in matches:
             if db.update_task_status(int(t_id), "DONE"):
                 closed_tasks.append(t_id)
 
-        # 4. 기본 알림 메시지 전송
-        msg = f"🚀 **Push** `{repo_name}`\nCommit: `{commit_id}` by **{author}**\nMsg: `{message}`"
+        # 3. 알림 메시지 (링크 포함)
+        msg = f"🚀 **Push** `{repo_name}`\nCommit: [`{short_id}`]({web_url}) by **{author}**\nMsg: `{message}`"
         if closed_tasks:
-            msg += f"\n✅ Closed Tasks: " + ", ".join([f"#{t}" for t in closed_tasks])
+            msg += f"\n✅ Closed: " + ", ".join([f"#{t}" for t in closed_tasks])
         
         await channel.send(msg)
 
-        # 5. [핵심] AI 코드 리뷰 생성
-        # Diff 가져오기 -> AI 분석 요청 -> Embed 전송
-        diff_text = await get_github_diff(url)
+        # 4. [수정] Diff 가져오기 (API URL 생성)
+        # Webhook에 있는 'url'은 사람이 보는 페이지이므로, API URL을 직접 조립해야 함.
+        # 형식: https://api.github.com/repos/{repo_name}/commits/{commit_id}
+        api_url = f"https://api.github.com/repos/{repo_name}/commits/{commit_id}"
+        
+        diff_text = await get_github_diff(api_url)
+        
         if diff_text:
             review_result = await ai.review_code(repo_name, author, message, diff_text)
-            
-            # 리뷰 결과가 너무 길면 잘라서 전송
-            embed = discord.Embed(title=f"🤖 AI Code Review ({commit_id})", url=url, color=0x2ecc71)
-            if len(review_result) > 1000:
-                embed.description = review_result[:1000] + "...\n(내용이 길어 생략됨)"
+            embed = discord.Embed(title=f"🤖 Code Review ({short_id})", url=web_url, color=0x2ecc71)
+            # 리뷰 내용이 길면 자름
+            if len(review_result) > 1024:
+                embed.description = review_result[:1020] + "..."
             else:
                 embed.description = review_result
-            
             await channel.send(embed=embed)
+        else:
+            print("DEBUG: Diff 텍스트를 가져오지 못했습니다.")
 
 async def webhook_handler(request):
-    # GET 요청: 브라우저 접속 테스트용
     if request.method == 'GET':
-        return web.Response(text="🟢 Bot Server is Running!")
-    
-    # POST 요청: Github Webhook
+        return web.Response(text="🟢 Bot Webhook Server OK")
     try:
         data = await request.json()
         bot.loop.create_task(process_webhook_payload(data))
@@ -382,7 +391,6 @@ async def webhook_handler(request):
 
 async def start_web_server():
     app = web.Application()
-    # GET, POST 모두 허용
     app.router.add_route('*', WEBHOOK_PATH, webhook_handler)
     runner = web.AppRunner(app)
     await runner.setup()
@@ -463,7 +471,6 @@ async def help_cmd(ctx, cmd: str = None):
 @bot.event
 async def on_message(message):
     if message.author.bot: return
-    # [변경] 구조화된 메시지 저장
     if message.channel.id in meeting_buffer and not message.content.startswith('!'):
         msg_obj = {
             'time': message.created_at.strftime("%H:%M"),
