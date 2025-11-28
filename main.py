@@ -28,9 +28,6 @@ DISCORD_TOKEN = load_key("bot_token")
 GEMINI_API_KEY = load_key("gemini_key")
 GITHUB_TOKEN = load_key("github_key")
 
-# 고정 채널 ID 제거 (DB에서 관리)
-# TARGET_CHANNEL_ID = ... 
-
 WEBHOOK_PORT = 8080 
 WEBHOOK_PATH = "/github-webhook"
 
@@ -57,23 +54,40 @@ class DBManager:
         c.execute('''CREATE TABLE IF NOT EXISTS users
                      (user_id INTEGER PRIMARY KEY, username TEXT, role TEXT, joined_at TEXT)''')
         
-        # 회의록 저장 테이블
+        # 회의록 저장 테이블 (jump_url 컬럼 추가됨)
         c.execute('''CREATE TABLE IF NOT EXISTS meetings
                      (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                       name TEXT, 
                       date TEXT, 
                       channel_id INTEGER, 
                       transcript TEXT, 
-                      summary TEXT)''')
+                      summary TEXT,
+                      jump_url TEXT)''')
+        
+        # 기존 테이블에 jump_url 컬럼이 없는 경우를 위한 마이그레이션
+        try:
+            c.execute("SELECT jump_url FROM meetings LIMIT 1")
+        except sqlite3.OperationalError:
+            c.execute("ALTER TABLE meetings ADD COLUMN jump_url TEXT")
 
-        # 레포지토리 추적 테이블 (New)
-        # repo_name 예: "google/guava"
+        # 레포지토리 추적 테이블
         c.execute('''CREATE TABLE IF NOT EXISTS repositories
                      (repo_name TEXT PRIMARY KEY, channel_id INTEGER, added_by TEXT, date TEXT)''')
+
+        # [NEW] 할 일(Task) 관리 테이블
+        c.execute('''CREATE TABLE IF NOT EXISTS tasks
+                     (task_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      project_name TEXT,
+                      content TEXT,
+                      assignee_id INTEGER,
+                      assignee_name TEXT,
+                      status TEXT DEFAULT 'TODO',
+                      created_at TEXT)''')
         
         conn.commit()
         conn.close()
 
+    # --- 사용자 관리 ---
     def add_user(self, user_id, username, role="user"):
         conn = sqlite3.connect(self.db_name)
         c = conn.cursor()
@@ -83,7 +97,7 @@ class DBManager:
             conn.commit()
             return True
         except sqlite3.IntegrityError:
-            return False # 이미 존재함
+            return False 
         finally:
             conn.close()
 
@@ -104,12 +118,13 @@ class DBManager:
         conn.close()
         return result is not None
 
-    def save_meeting(self, name, channel_id, transcript, summary):
+    # --- 회의록 관리 ---
+    def save_meeting(self, name, channel_id, transcript, summary, jump_url):
         conn = sqlite3.connect(self.db_name)
         c = conn.cursor()
         date_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-        c.execute("INSERT INTO meetings (name, date, channel_id, transcript, summary) VALUES (?, ?, ?, ?, ?)",
-                  (name, date_str, channel_id, transcript, summary))
+        c.execute("INSERT INTO meetings (name, date, channel_id, transcript, summary, jump_url) VALUES (?, ?, ?, ?, ?, ?)",
+                  (name, date_str, channel_id, transcript, summary, jump_url))
         log_id = c.lastrowid
         conn.commit()
         conn.close()
@@ -118,7 +133,7 @@ class DBManager:
     def get_recent_meetings(self, limit=5):
         conn = sqlite3.connect(self.db_name)
         c = conn.cursor()
-        c.execute("SELECT id, name, date, summary FROM meetings ORDER BY id DESC LIMIT ?", (limit,))
+        c.execute("SELECT id, name, date, summary, jump_url FROM meetings ORDER BY id DESC LIMIT ?", (limit,))
         rows = c.fetchall()
         conn.close()
         return rows
@@ -126,24 +141,22 @@ class DBManager:
     def get_meeting_detail(self, meeting_id):
         conn = sqlite3.connect(self.db_name)
         c = conn.cursor()
-        c.execute("SELECT name, date, summary, transcript FROM meetings WHERE id = ?", (meeting_id,))
+        c.execute("SELECT name, date, summary, transcript, jump_url FROM meetings WHERE id = ?", (meeting_id,))
         row = c.fetchone()
         conn.close()
         return row
 
-    # --- 레포지토리 관리 메서드 ---
+    # --- 레포지토리 관리 ---
     def add_repo(self, repo_name, channel_id, added_by):
         conn = sqlite3.connect(self.db_name)
         c = conn.cursor()
         try:
             date_str = datetime.datetime.now().strftime("%Y-%m-%d")
-            # 이미 있으면 업데이트 (채널 변경)
             c.execute("INSERT OR REPLACE INTO repositories (repo_name, channel_id, added_by, date) VALUES (?, ?, ?, ?)",
                       (repo_name, channel_id, added_by, date_str))
             conn.commit()
             return True
-        except Exception as e:
-            print(f"DB Error: {e}")
+        except Exception:
             return False
         finally:
             conn.close()
@@ -173,6 +186,48 @@ class DBManager:
         conn.close()
         return rows
 
+    # --- [NEW] 할 일(Task) 관리 메서드 ---
+    def add_task(self, project_name, content):
+        conn = sqlite3.connect(self.db_name)
+        c = conn.cursor()
+        date_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+        c.execute("INSERT INTO tasks (project_name, content, status, created_at) VALUES (?, ?, 'TODO', ?)",
+                  (project_name, content, date_str))
+        task_id = c.lastrowid
+        conn.commit()
+        conn.close()
+        return task_id
+
+    def get_tasks(self, project_name=None):
+        conn = sqlite3.connect(self.db_name)
+        c = conn.cursor()
+        if project_name:
+            c.execute("SELECT * FROM tasks WHERE project_name = ? ORDER BY task_id", (project_name,))
+        else:
+            c.execute("SELECT * FROM tasks ORDER BY task_id")
+        rows = c.fetchall()
+        conn.close()
+        return rows
+
+    def update_task_status(self, task_id, status):
+        conn = sqlite3.connect(self.db_name)
+        c = conn.cursor()
+        c.execute("UPDATE tasks SET status = ? WHERE task_id = ?", (status, task_id))
+        updated = c.rowcount > 0
+        conn.commit()
+        conn.close()
+        return updated
+
+    def assign_task(self, task_id, assignee_id, assignee_name):
+        conn = sqlite3.connect(self.db_name)
+        c = conn.cursor()
+        c.execute("UPDATE tasks SET assignee_id = ?, assignee_name = ? WHERE task_id = ?", 
+                  (assignee_id, assignee_name, task_id))
+        updated = c.rowcount > 0
+        conn.commit()
+        conn.close()
+        return updated
+
 db = DBManager()
 
 # ==================================================================
@@ -188,10 +243,9 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 
-# help_command=None으로 설정하여 기본 도움말을 끄고 커스텀 도움말을 사용
 bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 
-# 회의 데이터 버퍼: {channel_id: {'name': '회의명', 'messages': []}}
+# 회의 데이터 버퍼: {channel_id: {'name': '회의명', 'messages': [], 'jump_url': 'URL'}}
 meeting_buffer = {}
 
 # ==================================================================
@@ -211,28 +265,32 @@ def check_permission():
 @bot.command(name="도움말")
 async def help_command(ctx):
     """사용 가능한 명령어 목록을 보여줍니다."""
-    embed = discord.Embed(title="🤖 PM 봇 도움말", description="Github 연동 및 AI 회의록 기능을 제공하는 봇입니다.", color=0x00ff00)
+    embed = discord.Embed(title="🤖 PM 봇 도움말", description="올인원 프로젝트 관리 봇입니다.", color=0x00ff00)
     
+    embed.add_field(name="📋 프로젝트/할일", value=(
+        "`!할일등록 [프로젝트] [내용]`: 할 일을 추가합니다.\n"
+        "`!현황판 [프로젝트]`: 칸반 보드를 봅니다.\n"
+        "`!진행 [ID]`, `!완료 [ID]`: 상태를 변경합니다.\n"
+        "`!담당 [ID] [@멘션]`: 담당자를 지정합니다."
+    ), inline=False)
+
     embed.add_field(name="🎙️ 회의 관리", value=(
         "`!회의시작 [주제]` : 대화 기록을 시작합니다.\n"
         "`!회의종료` : 회의를 마치고 AI 요약본을 저장합니다.\n"
-        "`!회의목록` : 최근 저장된 회의록 리스트를 봅니다.\n"
-        "`!회의조회 [ID]` : 특정 회의록의 상세 내용을 확인합니다."
+        "`!회의목록` : 저장된 회의록과 바로가기 링크를 봅니다.\n"
+        "`!회의조회 [ID]` : 상세 내용을 확인합니다."
     ), inline=False)
 
     embed.add_field(name="🐙 Github 연동", value=(
-        "`!레포등록 [Owner/Repo]` : 현재 채널에 레포지토리 알림을 연결합니다.\n"
-        "`!레포삭제 [Owner/Repo]` : 레포지토리 연결을 해제합니다.\n"
-        "`!레포목록` : 연결된 레포지토리 목록을 확인합니다."
+        "`!레포등록 [Owner/Repo]` : 레포지토리 알림 연결\n"
+        "`!레포삭제 [Owner/Repo]` : 연결 해제\n"
+        "`!레포목록` : 목록 확인"
     ), inline=False)
     
     embed.add_field(name="👑 관리자 전용", value=(
-        "`!초기설정` : (최초 1회) 관리자를 등록합니다.\n"
-        "`!권한추가 [@유저]` : 봇 사용 권한을 부여합니다.\n"
-        "`!권한삭제 [@유저]` : 봇 사용 권한을 회수합니다."
+        "`!초기설정`, `!권한추가`, `!권한삭제`"
     ), inline=False)
     
-    embed.set_footer(text="Github Webhook이 연동되어 있으면 코드가 푸시될 때 자동으로 리뷰합니다.")
     await ctx.send(embed=embed)
 
 # ==================================================================
@@ -240,7 +298,6 @@ async def help_command(ctx):
 # ==================================================================
 @bot.command(name="초기설정")
 async def init_admin(ctx):
-    """최초 실행 시, 명령어를 입력한 사람을 관리자로 등록합니다."""
     conn = sqlite3.connect(db.db_name)
     c = conn.cursor()
     c.execute("SELECT count(*) FROM users")
@@ -251,23 +308,21 @@ async def init_admin(ctx):
         db.add_user(ctx.author.id, ctx.author.name, "admin")
         await ctx.send(f"👑 {ctx.author.mention} 님이 최초 관리자로 등록되었습니다.")
     else:
-        await ctx.send("이미 관리자가 존재합니다. 기존 관리자에게 권한을 요청하세요.")
+        await ctx.send("이미 관리자가 존재합니다.")
 
 @bot.command(name="권한추가")
 @check_permission()
 async def add_auth_user(ctx, member: discord.Member):
-    """(관리자용) 특정 유저에게 AI 사용 권한을 부여합니다."""
     if db.add_user(member.id, member.name):
-        await ctx.send(f"✅ {member.mention} 님에게 봇 사용 권한이 부여되었습니다.")
+        await ctx.send(f"✅ {member.mention} 님에게 권한 부여 완료.")
     else:
         await ctx.send(f"⚠️ {member.mention} 님은 이미 권한이 있습니다.")
 
 @bot.command(name="권한삭제")
 @check_permission()
 async def remove_auth_user(ctx, member: discord.Member):
-    """(관리자용) 유저의 권한을 회수합니다."""
     if db.remove_user(member.id):
-        await ctx.send(f"🗑️ {member.mention} 님의 권한이 회수되었습니다.")
+        await ctx.send(f"🗑️ {member.mention} 님의 권한 회수 완료.")
     else:
         await ctx.send("❌ 해당 유저는 등록되어 있지 않습니다.")
 
@@ -277,25 +332,22 @@ async def remove_auth_user(ctx, member: discord.Member):
 @bot.command(name="레포등록")
 @check_permission()
 async def add_repo(ctx, repo_name: str):
-    """현재 채널에 Github 레포지토리를 연결합니다. (예: !레포등록 google/guava)"""
     if db.add_repo(repo_name, ctx.channel.id, ctx.author.name):
-        await ctx.send(f"✅ **{repo_name}** 레포지토리가 이 채널(<#{ctx.channel.id}>)에 연결되었습니다.")
+        await ctx.send(f"✅ **{repo_name}** 연결 완료.")
     else:
-        await ctx.send("❌ 레포지토리 등록 실패.")
+        await ctx.send("❌ 등록 실패.")
 
 @bot.command(name="레포삭제")
 @check_permission()
 async def remove_repo(ctx, repo_name: str):
-    """Github 레포지토리 연결을 해제합니다."""
     if db.remove_repo(repo_name):
-        await ctx.send(f"🗑️ **{repo_name}** 레포지토리 연결이 해제되었습니다.")
+        await ctx.send(f"🗑️ **{repo_name}** 해제 완료.")
     else:
         await ctx.send("❌ 등록되지 않은 레포지토리입니다.")
 
 @bot.command(name="레포목록")
 @check_permission()
 async def list_repos(ctx):
-    """등록된 레포지토리 목록을 보여줍니다."""
     rows = db.get_all_repos()
     if not rows:
         await ctx.send("📭 등록된 레포지토리가 없습니다.")
@@ -304,8 +356,83 @@ async def list_repos(ctx):
     embed = discord.Embed(title="🐙 연동된 레포지토리 목록", color=0x6e5494)
     for repo, channel_id in rows:
         embed.add_field(name=repo, value=f"📢 <#{channel_id}>", inline=False)
+    await ctx.send(embed=embed)
+
+# ==================================================================
+# [NEW] 프로젝트 및 할 일 관리 시스템
+# ==================================================================
+
+@bot.command(name="할일등록")
+@check_permission()
+async def add_task_cmd(ctx, project_name: str, *, content: str):
+    """새로운 할 일을 등록합니다. (예: !할일등록 MVP개발 로그인페이지구현)"""
+    task_id = db.add_task(project_name, content)
+    await ctx.send(f"✅ [Project: {project_name}] 할 일 등록 완료 (ID: **{task_id}**)")
+
+@bot.command(name="현황판")
+@check_permission()
+async def status_board_cmd(ctx, project_name: str = None):
+    """프로젝트 현황판을 보여줍니다. 프로젝트명을 입력하지 않으면 전체를 보여줍니다."""
+    tasks = db.get_tasks(project_name)
+    if not tasks:
+        await ctx.send("📭 등록된 할 일이 없습니다.")
+        return
+
+    # 상태별 분류
+    todo_list = []
+    prog_list = []
+    done_list = []
+
+    for task in tasks:
+        # task: (id, project, content, assignee_id, assignee_name, status, created_at)
+        t_id, p_name, content, a_id, a_name, status, created = task
+        assignee = f"@{a_name}" if a_name else "미정"
+        # 전체 조회일 경우 프로젝트명도 표시
+        prefix = f"[{p_name}] " if not project_name else ""
+        line = f"**#{t_id}** {prefix}{content} (👤{assignee})"
+
+        if status == "TODO":
+            todo_list.append(line)
+        elif status == "IN_PROGRESS":
+            prog_list.append(line)
+        elif status == "DONE":
+            done_list.append(line)
+
+    title = f"📊 {project_name} 현황판" if project_name else "📊 전체 프로젝트 현황판"
+    embed = discord.Embed(title=title, color=0xf1c40f)
+    
+    embed.add_field(name=f"⚪ 대기 중 ({len(todo_list)})", value="\n".join(todo_list) if todo_list else "-", inline=False)
+    embed.add_field(name=f"🔵 진행 중 ({len(prog_list)})", value="\n".join(prog_list) if prog_list else "-", inline=False)
+    embed.add_field(name=f"🟢 완료 ({len(done_list)})", value="\n".join(done_list) if done_list else "-", inline=False)
     
     await ctx.send(embed=embed)
+
+@bot.command(name="진행")
+@check_permission()
+async def set_progress_cmd(ctx, task_id: int):
+    """할 일 상태를 '진행 중'으로 변경합니다."""
+    if db.update_task_status(task_id, "IN_PROGRESS"):
+        await ctx.message.add_reaction("🏃")
+    else:
+        await ctx.send("❌ 해당 ID의 할 일을 찾을 수 없습니다.")
+
+@bot.command(name="완료")
+@check_permission()
+async def set_done_cmd(ctx, task_id: int):
+    """할 일 상태를 '완료'로 변경합니다."""
+    if db.update_task_status(task_id, "DONE"):
+        await ctx.message.add_reaction("✅")
+    else:
+        await ctx.send("❌ 해당 ID의 할 일을 찾을 수 없습니다.")
+
+@bot.command(name="담당")
+@check_permission()
+async def assign_task_cmd(ctx, task_id: int, member: discord.Member):
+    """할 일의 담당자를 지정합니다."""
+    if db.assign_task(task_id, member.id, member.name):
+        await ctx.send(f"👤 할 일 **#{task_id}** 담당자가 {member.mention}님으로 지정되었습니다.")
+    else:
+        await ctx.send("❌ 해당 ID의 할 일을 찾을 수 없습니다.")
 
 # ==================================================================
 # [회의록 시스템]
@@ -314,15 +441,17 @@ async def list_repos(ctx):
 @bot.command(name="회의시작")
 @check_permission()
 async def start_meeting(ctx, *, meeting_name: str):
-    """회의를 시작합니다."""
+    """회의를 시작하고 시작 메시지의 링크를 저장합니다."""
     if ctx.channel.id in meeting_buffer:
         current_name = meeting_buffer[ctx.channel.id]['name']
         await ctx.send(f"🔴 이미 '{current_name}' 회의가 진행 중입니다.")
         return
     
+    # [NEW] 시작 메시지의 Jump URL 저장
     meeting_buffer[ctx.channel.id] = {
         'name': meeting_name,
-        'messages': []
+        'messages': [],
+        'jump_url': ctx.message.jump_url 
     }
     
     embed = discord.Embed(title=f"🎙️ 회의 시작: {meeting_name}", 
@@ -341,6 +470,7 @@ async def stop_meeting(ctx):
     data = meeting_buffer.pop(ctx.channel.id)
     meeting_name = data['name']
     messages = data['messages']
+    jump_url = data.get('jump_url', '') # 저장된 URL 가져오기
     
     if not messages:
         await ctx.send("📝 기록된 대화가 없어 회의록을 생성하지 않습니다.")
@@ -369,7 +499,8 @@ async def stop_meeting(ctx):
         response = await asyncio.to_thread(model.generate_content, prompt)
         summary = response.text
         
-        log_id = db.save_meeting(meeting_name, ctx.channel.id, transcript, summary)
+        # URL 포함하여 저장
+        log_id = db.save_meeting(meeting_name, ctx.channel.id, transcript, summary, jump_url)
         
         await waiting_msg.delete()
         
@@ -386,7 +517,7 @@ async def stop_meeting(ctx):
 @bot.command(name="회의목록")
 @check_permission()
 async def list_meetings(ctx):
-    """최근 회의록 목록 조회"""
+    """최근 회의록 목록 조회 (바로가기 링크 포함)"""
     rows = db.get_recent_meetings()
     if not rows:
         await ctx.send("📭 저장된 회의록이 없습니다.")
@@ -394,9 +525,19 @@ async def list_meetings(ctx):
     
     embed = discord.Embed(title="📂 최근 회의록 목록", color=0xf1c40f)
     for row in rows:
-        m_id, name, date, summary = row
+        m_id, name, date, summary, jump_url = row
+        
+        # 요약본 대신 바로가기 링크 제공
+        value_text = f"📅 {date}\n"
+        if jump_url:
+            value_text += f"🔗 [대화 내용 보러가기]({jump_url})\n"
+        else:
+            value_text += "🔗 (링크 없음)\n"
+            
         short_summary = summary.split('\n')[0][:30] + "..." if summary else "요약 없음"
-        embed.add_field(name=f"ID [{m_id}] {name}", value=f"📅 {date}\n📝 {short_summary}", inline=False)
+        value_text += f"📝 {short_summary}"
+
+        embed.add_field(name=f"ID [{m_id}] {name}", value=value_text, inline=False)
     
     await ctx.send(embed=embed)
 
@@ -409,8 +550,14 @@ async def view_meeting(ctx, meeting_id: int):
         await ctx.send("❌ 해당 ID의 회의록을 찾을 수 없습니다.")
         return
     
-    name, date, summary, transcript = row
-    await ctx.send(f"**📂 회의: {name} ({date})**\n\n{summary}")
+    name, date, summary, transcript, jump_url = row
+    
+    msg = f"**📂 회의: {name} ({date})**\n"
+    if jump_url:
+        msg += f"🔗 [당시 대화로 이동하기]({jump_url})\n"
+    msg += f"\n{summary}"
+    
+    await ctx.send(msg)
 
 # ==================================================================
 # [이벤트 핸들러]
@@ -446,12 +593,10 @@ async def get_github_diff(commit_url):
 
 async def process_webhook_payload(data):
     """Webhook 데이터 처리 및 리뷰 트리거"""
-    # 1. 커밋 데이터 확인
     if 'commits' not in data or 'repository' not in data:
         return
 
-    # 2. 레포지토리 정보 확인 및 타겟 채널 조회
-    repo_full_name = data['repository']['full_name'] # 예: "owner/repo"
+    repo_full_name = data['repository']['full_name'] 
     target_channel_id = db.get_repo_channel(repo_full_name)
 
     if not target_channel_id:
