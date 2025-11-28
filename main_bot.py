@@ -9,6 +9,7 @@ import re
 from database import DBManager
 from ai_helper import AIHelper
 import datetime
+import json
 
 # ==================================================================
 # [1. 설정 및 키 로드]
@@ -74,7 +75,7 @@ class HelpPaginator(View):
         await interaction.response.edit_message(embed=self.embeds[self.current_page], view=self)
 
 # ==================================================================
-# [4. 권한 체크]
+# [4. 권한 체크 데코레이터]
 # ==================================================================
 def check_permission():
     async def predicate(ctx):
@@ -189,17 +190,16 @@ async def assign_task_cmd(ctx, task_id: int, member: discord.Member):
     else: await ctx.send("❌ ID 확인 불가")
 
 # ==================================================================
-# [8. 회의록 시스템 (Embed 강화)]
+# [8. 회의록 시스템 (자동 제목 & 서버 격리)]
 # ==================================================================
 @bot.command(name="회의시작")
 @check_permission()
 async def start_meeting(ctx, *, meeting_name: str = None):
-    """[변경] 제목을 입력하지 않아도 자동 시작"""
     if ctx.channel.id in meeting_buffer:
         await ctx.send("🔴 이미 이 채널에서 회의가 진행 중입니다.")
         return
     
-    # 제목이 없으면 임시 제목 생성
+    # 제목 입력 없으면 임시 제목 사용
     if not meeting_name:
         now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
         meeting_name = f"{now} 회의 (진행 중)"
@@ -207,6 +207,7 @@ async def start_meeting(ctx, *, meeting_name: str = None):
     meeting_buffer[ctx.channel.id] = {'name': meeting_name, 'messages': [], 'jump_url': ctx.message.jump_url}
     
     embed = discord.Embed(title=f"🎙️ 회의 시작", color=0xe74c3c)
+    embed.add_field(name="상태", value="🔴 녹음 중 (Recording...)", inline=True)
     embed.add_field(name="임시 제목", value=meeting_name, inline=True)
     embed.add_field(name="안내", value="종료 시 AI가 내용을 분석해 **제목을 자동으로 수정**합니다.", inline=False)
     embed.set_footer(text="!회의종료 입력 시 자동 저장됩니다.")
@@ -229,10 +230,10 @@ async def stop_meeting(ctx):
 
     waiting = await ctx.send("🤖 AI가 회의를 분석하고 제목을 짓고 있습니다...")
 
-    # [변경] AI에게 제목과 내용을 함께 요청
+    # AI 처리 (제목 포함 요약 요청)
     full_result = await ai.generate_meeting_summary(transcript)
     
-    # 결과 파싱 (제목: ... 분리)
+    # 제목 분리 파싱
     lines = full_result.strip().split('\n')
     if lines[0].startswith("제목:"):
         final_title = lines[0].replace("제목:", "").strip()
@@ -241,7 +242,7 @@ async def stop_meeting(ctx):
         final_title = f"{datetime.datetime.now().strftime('%Y-%m-%d')} 회의"
         summary_body = full_result
 
-    # [변경] 저장 시 guild_id 포함
+    # DB 저장 (guild_id 포함)
     m_id = db.save_meeting(ctx.guild.id, final_title, ctx.channel.id, transcript, summary_body, data['jump_url'])
     
     # 할 일 추출
@@ -259,7 +260,9 @@ async def stop_meeting(ctx):
     
     if task_text:
         embed.add_field(name="⚡ 도출된 Action Items", value=task_text, inline=False)
-    
+    else:
+        embed.add_field(name="⚡ Action Items", value="도출된 할 일이 없습니다.", inline=False)
+        
     embed.add_field(name="관리", value=f"ID: `{m_id}` | `!회의조회 {m_id}`", inline=False)
     
     await ctx.send(embed=embed)
@@ -267,7 +270,7 @@ async def stop_meeting(ctx):
 @bot.command(name="회의목록")
 @check_permission()
 async def list_meetings(ctx):
-    # [변경] guild_id를 전달해 해당 서버 회의만 조회
+    # 해당 서버(guild_id)의 회의록만 조회
     rows = db.get_recent_meetings(ctx.guild.id)
     if not rows:
         await ctx.send("📭 이 서버에는 저장된 회의록이 없습니다.")
@@ -282,7 +285,7 @@ async def list_meetings(ctx):
 @bot.command(name="회의조회")
 @check_permission()
 async def view_meeting(ctx, m_id: int):
-    # [변경] guild_id 전달
+    # 해당 서버(guild_id) 확인
     row = db.get_meeting_detail(m_id, ctx.guild.id)
     if not row:
         await ctx.send("❌ 해당 ID의 회의록이 없거나 이 서버의 회의가 아닙니다.")
@@ -294,43 +297,61 @@ async def view_meeting(ctx, m_id: int):
 @bot.command(name="회의삭제")
 @check_permission()
 async def delete_meeting(ctx, m_id: int):
-    # [변경] guild_id 전달
+    # 해당 서버(guild_id) 확인 후 삭제
     if db.delete_meeting(m_id, ctx.guild.id):
         await ctx.send(f"🗑️ 회의록 **#{m_id}** 삭제 완료.")
     else:
         await ctx.send("❌ 삭제 실패 (존재하지 않거나 권한 없음).")
+
 # ==================================================================
-# [9. Github Webhook]
+# [9. Github Webhook (디버깅 모드)]
 # ==================================================================
 async def get_github_diff(commit_url):
+    print(f"DEBUG: Diff 요청 URL: {commit_url}")
     async with aiohttp.ClientSession() as session:
         async with session.get(commit_url, headers=github_headers) as resp:
+            print(f"DEBUG: Github API 응답 코드: {resp.status}")
             if resp.status == 200:
                 data = await resp.json()
                 diff = ""
                 for file in data.get('files', []):
                     diff += f"📄 {file['filename']}\n{file.get('patch','')}\n\n"
                 return diff
+            else:
+                print("DEBUG: Diff 가져오기 실패")
             return None
 
 async def process_webhook_payload(data):
-    if 'repository' not in data: return
+    print("DEBUG: >> process_webhook_payload 진입")
+    
+    if 'repository' not in data:
+        print("DEBUG: ❌ 데이터에 'repository' 정보 없음")
+        return
+    
     repo_name = data['repository']['full_name']
+    print(f"DEBUG: 감지된 레포지토리: {repo_name}")
+    
     target_channel_id = db.get_repo_channel(repo_name)
+    print(f"DEBUG: DB 조회된 채널 ID: {target_channel_id}")
+    
     if not target_channel_id:
-        print(f"⚠️ Unknown Repo: {repo_name}")
+        print("DEBUG: ⚠️ 등록되지 않은 레포지토리입니다.")
         return
     
     channel = bot.get_channel(target_channel_id)
-    if not channel: return
+    print(f"DEBUG: 봇이 찾은 채널 객체: {channel}")
+    
+    if not channel:
+        print("DEBUG: ❌ 채널을 찾을 수 없음 (봇 권한 확인 필요)")
+        return
 
     for commit in data.get('commits', []):
+        print(f"DEBUG: 커밋 처리 중... {commit.get('id')}")
         author = commit['author']['name']
         message = commit['message']
         url = commit['url']
         commit_id = commit['id'][:7]
 
-        # Task 자동 완료
         closed = []
         matches = re.findall(r'(?:fix|close|resolve)\s*#(\d+)', message, re.IGNORECASE)
         for t_id in matches:
@@ -338,22 +359,32 @@ async def process_webhook_payload(data):
 
         msg = f"🚀 **Push** `{repo_name}`\nCommit: `{commit_id}` by **{author}**\nMsg: `{message}`"
         if closed: msg += f"\n✅ Closed: " + ", ".join([f"#{t}" for t in closed])
-        await channel.send(msg)
+        
+        try:
+            await channel.send(msg)
+            print("DEBUG: 디스코드 메시지 전송 성공")
+        except Exception as e:
+            print(f"DEBUG: 메시지 전송 에러: {e}")
 
-        # AI Review
         diff = await get_github_diff(url)
         if diff:
+            print("DEBUG: AI 리뷰 생성 요청...")
             review = await ai.review_code(repo_name, author, message, diff)
             embed = discord.Embed(title=f"🤖 Review ({commit_id})", url=url, color=0x2ecc71)
             embed.description = review[:1000]
             await channel.send(embed=embed)
+            print("DEBUG: 리뷰 전송 완료")
 
 async def webhook_handler(request):
+    print(f"DEBUG: 📡 Webhook 요청 수신됨! (IP: {request.remote})")
     try:
         data = await request.json()
+        # print(f"DEBUG: 데이터 일부: {str(data)[:200]}") # 필요시 주석 해제
         bot.loop.create_task(process_webhook_payload(data))
         return web.Response(text="OK")
-    except: return web.Response(status=500)
+    except Exception as e:
+        print(f"DEBUG: Webhook 핸들러 에러: {e}")
+        return web.Response(status=500)
 
 async def start_web_server():
     app = web.Application()
@@ -367,38 +398,69 @@ async def start_web_server():
 # ==================================================================
 # [10. 도움말 (페이지네이션 적용)]
 # ==================================================================
-@bot.command(name="도움말")
-async def help_cmd(ctx):
-    """페이지네이션이 적용된 도움말"""
+COMMAND_INFO = {
+    # 📋 프로젝트 관리
+    "할일등록": {"desc": "새로운 할 일을 등록합니다.", "usage": "!할일등록 [프로젝트명] [내용]", "ex": "!할일등록 MVP 로그인구현"},
+    "현황판": {"desc": "프로젝트 할 일 목록을 봅니다.", "usage": "!현황판 [프로젝트명(선택)]", "ex": "!현황판"},
+    "완료": {"desc": "할 일을 완료 상태로 변경합니다.", "usage": "!완료 [ID]", "ex": "!완료 12"},
+    "담당": {"desc": "할 일의 담당자를 지정합니다.", "usage": "!담당 [ID] [@멘션]", "ex": "!담당 12 @홍길동"},
     
-    # 페이지 1: 프로젝트
-    embed1 = discord.Embed(title="📋 프로젝트 관리 명령어", description="할 일과 프로젝트를 관리하세요.", color=0x3498db)
-    embed1.add_field(name="!할일등록 [프로젝트] [내용]", value="새로운 할 일을 등록합니다.", inline=False)
-    embed1.add_field(name="!현황판 [프로젝트(선택)]", value="칸반 보드를 보여줍니다.", inline=False)
-    embed1.add_field(name="!완료 [ID]", value="할 일을 완료 처리합니다.", inline=False)
-    embed1.add_field(name="!담당 [ID] [@멘션]", value="담당자를 지정합니다.", inline=False)
-    embed1.set_footer(text="Page 1/3")
+    # 🎙️ 회의록
+    "회의시작": {"desc": "대화 내용 기록을 시작합니다. (제목 자동 생성)", "usage": "!회의시작 [제목(선택)]", "ex": "!회의시작"},
+    "회의종료": {"desc": "기록을 마치고 회의록/할일을 생성합니다.", "usage": "!회의종료", "ex": "!회의종료"},
+    "회의목록": {"desc": "저장된 회의록 리스트를 봅니다.", "usage": "!회의목록", "ex": "!회의목록"},
+    "회의조회": {"desc": "회의록 상세 내용과 링크를 봅니다.", "usage": "!회의조회 [ID]", "ex": "!회의조회 5"},
+    "회의삭제": {"desc": "회의록을 삭제합니다.", "usage": "!회의삭제 [ID]", "ex": "!회의삭제 5"},
 
-    # 페이지 2: 회의
-    embed2 = discord.Embed(title="🎙️ 회의 시스템 명령어", description="회의를 기록하고 AI로 요약하세요.", color=0xe74c3c)
-    embed2.add_field(name="!회의시작 [주제]", value="기록을 시작합니다.", inline=False)
-    embed2.add_field(name="!회의종료", value="기록을 끝내고 요약본을 만듭니다.", inline=False)
-    embed2.add_field(name="!회의목록", value="저장된 회의록을 봅니다.", inline=False)
-    embed2.add_field(name="!회의조회 [ID]", value="상세 내용을 확인합니다.", inline=False)
-    embed2.add_field(name="!회의삭제 [ID]", value="회의록을 삭제합니다.", inline=False)
-    embed2.set_footer(text="Page 2/3")
+    # 🐙 Github 연동
+    "레포등록": {"desc": "Github 레포지토리 알림을 현재 채널에 연결합니다.", "usage": "!레포등록 [Owner/Repo]", "ex": "!레포등록 google/guava"},
+    "레포삭제": {"desc": "레포지토리 연결을 해제합니다.", "usage": "!레포삭제 [Owner/Repo]", "ex": "!레포삭제 google/guava"},
+    "레포목록": {"desc": "현재 연결된 레포지토리 목록을 봅니다.", "usage": "!레포목록", "ex": "!레포목록"},
 
-    # 페이지 3: Github & 관리
-    embed3 = discord.Embed(title="⚙️ Github & 관리 명령어", description="레포지토리 연동 및 권한 설정.", color=0x9b59b6)
-    embed3.add_field(name="!레포등록 [Owner/Repo]", value="Github 알림 채널 연결.", inline=False)
-    embed3.add_field(name="!레포삭제 [Owner/Repo]", value="연결 해제.", inline=False)
-    embed3.add_field(name="!초기설정", value="최초 관리자 등록.", inline=False)
-    embed3.add_field(name="!권한추가/삭제 [@멘션]", value="봇 사용 권한 부여/회수.", inline=False)
-    embed3.set_footer(text="Page 3/3")
+    # 👑 권한 관리
+    "초기설정": {"desc": "최초 관리자를 등록합니다. (1회용)", "usage": "!초기설정", "ex": "!초기설정"},
+    "권한추가": {"desc": "봇 사용 권한을 부여합니다.", "usage": "!권한추가 [@멘션]", "ex": "!권한추가 @팀원"},
+    "권한삭제": {"desc": "봇 사용 권한을 회수합니다.", "usage": "!권한삭제 [@멘션]", "ex": "!권한삭제 @팀원"}
+}
 
-    embeds = [embed1, embed2, embed3]
-    view = HelpPaginator(embeds)
-    await ctx.send(embed=embed1, view=view)
+@bot.command(name="도움말")
+async def help_cmd(ctx, cmd: str = None):
+    if cmd:
+        info = COMMAND_INFO.get(cmd)
+        if info:
+            embed = discord.Embed(title=f"❓ 도움말: !{cmd}", color=0x00ff00)
+            embed.add_field(name="설명", value=info['desc'], inline=False)
+            embed.add_field(name="사용법", value=f"`{info['usage']}`", inline=False)
+            embed.add_field(name="예시", value=f"`{info['ex']}`", inline=False)
+            await ctx.send(embed=embed)
+        else:
+            await ctx.send(f"❌ `{cmd}` 명령어를 찾을 수 없습니다.")
+    else:
+        embed1 = discord.Embed(title="📋 프로젝트 관리 명령어", description="할 일과 프로젝트를 관리하세요.", color=0x3498db)
+        embed1.add_field(name="!할일등록 [프로젝트] [내용]", value="새로운 할 일을 등록합니다.", inline=False)
+        embed1.add_field(name="!현황판 [프로젝트(선택)]", value="칸반 보드를 보여줍니다.", inline=False)
+        embed1.add_field(name="!완료 [ID]", value="할 일을 완료 처리합니다.", inline=False)
+        embed1.add_field(name="!담당 [ID] [@멘션]", value="담당자를 지정합니다.", inline=False)
+        embed1.set_footer(text="Page 1/3")
+
+        embed2 = discord.Embed(title="🎙️ 회의 시스템 명령어", description="회의를 기록하고 AI로 요약하세요.", color=0xe74c3c)
+        embed2.add_field(name="!회의시작 [제목(선택)]", value="기록을 시작합니다.", inline=False)
+        embed2.add_field(name="!회의종료", value="기록을 끝내고 요약본을 만듭니다.", inline=False)
+        embed2.add_field(name="!회의목록", value="저장된 회의록을 봅니다.", inline=False)
+        embed2.add_field(name="!회의조회 [ID]", value="상세 내용을 확인합니다.", inline=False)
+        embed2.add_field(name="!회의삭제 [ID]", value="회의록을 삭제합니다.", inline=False)
+        embed2.set_footer(text="Page 2/3")
+
+        embed3 = discord.Embed(title="⚙️ Github & 관리 명령어", description="레포지토리 연동 및 권한 설정.", color=0x9b59b6)
+        embed3.add_field(name="!레포등록 [Owner/Repo]", value="Github 알림 채널 연결.", inline=False)
+        embed3.add_field(name="!레포삭제 [Owner/Repo]", value="연결 해제.", inline=False)
+        embed3.add_field(name="!레포목록", value="목록 확인.", inline=False)
+        embed3.add_field(name="!초기설정", value="최초 관리자 등록.", inline=False)
+        embed3.add_field(name="!권한추가/삭제 [@멘션]", value="권한 부여/회수.", inline=False)
+        embed3.set_footer(text="Page 3/3")
+
+        view = HelpPaginator([embed1, embed2, embed3])
+        await ctx.send(embed=embed1, view=view)
 
 # ==================================================================
 # [11. 실행]
