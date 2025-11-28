@@ -49,18 +49,26 @@ github_headers = {
 }
 
 # ==================================================================
-# [3. UI 클래스 (페이지네이션)]
+# [3. UI 클래스 (페이지네이션 - 권한 체크 추가)]
 # ==================================================================
 class EmbedPaginator(View):
-    def __init__(self, embeds):
-        super().__init__(timeout=120) 
+    def __init__(self, embeds, author=None):
+        super().__init__(timeout=120)
         self.embeds = embeds
         self.current_page = 0
+        self.author = author # 명령어를 입력한 사용자 저장
         self.update_buttons()
 
     def update_buttons(self):
         self.children[0].disabled = (self.current_page == 0)
         self.children[1].disabled = (self.current_page == len(self.embeds) - 1)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        # author가 설정되어 있다면, 해당 유저인지 확인
+        if self.author and interaction.user != self.author:
+            await interaction.response.send_message("🚫 이 버튼은 명령어를 입력한 사람만 누를 수 있습니다.", ephemeral=True)
+            return False
+        return True
 
     @discord.ui.button(label="◀️ 이전", style=discord.ButtonStyle.secondary)
     async def prev_button(self, interaction: discord.Interaction, button: Button):
@@ -118,18 +126,17 @@ async def remove_auth_user(ctx, member: discord.Member):
 @check_permission()
 async def add_repo(ctx, repo_name: str):
     if db.add_repo(repo_name, ctx.channel.id, ctx.author.name):
-        await ctx.send(f"✅ **{repo_name}** → <#{ctx.channel.id}> 연결 성공.\n(이미 등록된 레포라면 이 채널에도 추가되었습니다)")
+        await ctx.send(f"✅ **{repo_name}** → <#{ctx.channel.id}> 연결 성공.")
     else:
         await ctx.send("❌ 등록 실패.")
 
 @bot.command(name="레포삭제")
 @check_permission()
 async def remove_repo(ctx, repo_name: str):
-    # [변경] 현재 채널 ID를 함께 전달하여 해당 채널 연결만 해제
     if db.remove_repo(repo_name, ctx.channel.id):
-        await ctx.send(f"🗑️ **{repo_name}** 이 채널에서의 연결 해제.")
+        await ctx.send(f"🗑️ **{repo_name}** 연결 해제.")
     else:
-        await ctx.send("❌ 이 채널에 등록되지 않은 레포입니다.")
+        await ctx.send("❌ 미등록 레포.")
 
 @bot.command(name="레포목록")
 @check_permission()
@@ -258,7 +265,7 @@ async def stop_meeting(ctx):
     embed.add_field(name="📄 요약본", value=summary_body[:500] + ("..." if len(summary_body)>500 else ""), inline=False)
     
     if task_text:
-        embed.add_field(name="⚡ 도출된 Action Items", value=task_text, inline=False)
+        embed.add_field(name="⚡ 도출된 Action Items (자동등록됨)", value=task_text, inline=False)
     
     embed.add_field(name="관리", value=f"ID: `{m_id}` | `!회의조회 {m_id}`", inline=False)
     
@@ -289,32 +296,25 @@ async def view_meeting(ctx, m_id: int):
     
     chunks = []
     current_chunk = ""
-    
     for line in summary.split('\n'):
         if len(current_chunk) + len(line) + 10 > 1500:
             chunks.append(current_chunk)
             current_chunk = line
         else:
-            if current_chunk:
-                current_chunk += "\n" + line
-            else:
-                current_chunk = line
-    
-    if current_chunk:
-        chunks.append(current_chunk)
+            if current_chunk: current_chunk += "\n" + line
+            else: current_chunk = line
+    if current_chunk: chunks.append(current_chunk)
         
     embeds = []
     for i, chunk in enumerate(chunks):
         embed = discord.Embed(title=f"📂 {name} ({date})", description=chunk, color=0xf1c40f)
-        if link:
-             embed.add_field(name="링크", value=f"[대화 내용으로 이동]({link})", inline=False)
-             
-        if len(chunks) > 1:
-            embed.set_footer(text=f"Page {i+1}/{len(chunks)}")
+        if link: embed.add_field(name="링크", value=f"[대화 내용으로 이동]({link})", inline=False)
+        if len(chunks) > 1: embed.set_footer(text=f"Page {i+1}/{len(chunks)}")
         embeds.append(embed)
     
+    # [변경] author=ctx.author 전달
     if len(embeds) > 1:
-        view = EmbedPaginator(embeds)
+        view = EmbedPaginator(embeds, author=ctx.author)
         await ctx.send(embed=embeds[0], view=view)
     elif embeds:
         await ctx.send(embed=embeds[0])
@@ -339,25 +339,20 @@ async def get_github_diff(api_url):
             if resp.status == 200:
                 data = await resp.json()
                 diff_lines = []
-                
                 ignored_files = ['package-lock.json', 'yarn.lock', 'poetry.lock', 'Gemfile.lock']
                 ignored_exts = ('.svg', '.png', '.jpg', '.jpeg', '.gif', '.ico', '.pdf')
 
                 for file in data.get('files', []):
                     filename = file['filename']
-                    
                     if filename in ignored_files or filename.endswith(ignored_exts):
                         diff_lines.append(f"📄 File: {filename} (Skipped: Auto-generated/Asset)")
                         continue
-
                     patch = file.get('patch', None)
                     if not patch:
                         diff_lines.append(f"📄 File: {filename} (Skipped: Binary or Too Large)")
                         continue
-                    
                     if len(patch) > 2500:
                         patch = patch[:2500] + "\n... (Diff truncated due to length) ..."
-                    
                     diff_lines.append(f"📄 File: {filename}\n{patch}\n")
                 
                 return "\n".join(diff_lines)
@@ -367,16 +362,12 @@ async def get_github_diff(api_url):
 
 async def process_webhook_payload(data):
     if 'repository' not in data: return
-    
     repo_name = data['repository']['full_name']
-    
-    # [변경] 모든 연결된 채널 가져오기
-    target_channel_ids = db.get_repo_channels(repo_name) # Returns list
+    target_channel_ids = db.get_repo_channels(repo_name)
     if not target_channel_ids:
         print(f"DEBUG: 알 수 없는 레포지토리: {repo_name}")
         return
     
-    # 연결된 채널이 있으면 커밋/리뷰 데이터를 준비
     commits = data.get('commits', [])
     if not commits: return
 
@@ -387,27 +378,22 @@ async def process_webhook_payload(data):
         commit_id = commit['id']
         short_id = commit_id[:7]
 
-        # 2. Task 자동 완료
         closed_tasks = []
         matches = re.findall(r'(?:fix|close|resolve)\s*#(\d+)', message, re.IGNORECASE)
         for t_id in matches:
             if db.update_task_status(int(t_id), "DONE"):
                 closed_tasks.append(t_id)
 
-        # 3. 알림 메시지 생성
         msg_content = f"🚀 **Push** `{repo_name}`\nCommit: [`{short_id}`]({web_url}) by **{author}**\nMsg: `{message}`"
         if closed_tasks:
             msg_content += f"\n✅ Closed: " + ", ".join([f"#{t}" for t in closed_tasks])
         
-        # 4. 리뷰 생성 (한 번만 생성해서 모든 채널에 뿌림)
         api_url = f"https://api.github.com/repos/{repo_name}/commits/{commit_id}"
         diff_text = await get_github_diff(api_url)
         
         review_embeds = []
         if diff_text:
             review_result = await ai.review_code(repo_name, author, message, diff_text)
-            
-            # 페이지네이션 Embed 생성
             chunks = []
             current_chunk = ""
             in_code_block = False
@@ -422,42 +408,30 @@ async def process_webhook_payload(data):
                         chunks.append(current_chunk)
                         current_chunk = line
                 else:
-                    if current_chunk:
-                        current_chunk += "\n" + line
-                    else:
-                        current_chunk = line
+                    if current_chunk: current_chunk += "\n" + line
+                    else: current_chunk = line
                 
                 stripped = line.strip()
                 if stripped.startswith("```"):
-                    if in_code_block:
-                        in_code_block = False
-                        code_block_lang = ""
-                    else:
-                        in_code_block = True
-                        code_block_lang = stripped.replace("```", "").strip()
+                    if in_code_block: in_code_block = False; code_block_lang = ""
+                    else: in_code_block = True; code_block_lang = stripped.replace("```", "").strip()
             
-            if current_chunk:
-                chunks.append(current_chunk)
+            if current_chunk: chunks.append(current_chunk)
             
             for i, chunk in enumerate(chunks):
                 embed = discord.Embed(title=f"🤖 Code Review ({short_id})", url=web_url, color=0x2ecc71)
                 embed.description = chunk
-                if len(chunks) > 1:
-                    embed.set_footer(text=f"Page {i+1}/{len(chunks)}")
+                if len(chunks) > 1: embed.set_footer(text=f"Page {i+1}/{len(chunks)}")
                 review_embeds.append(embed)
 
-        # 5. [핵심] 모든 채널에 전송
         for channel_id in target_channel_ids:
             channel = bot.get_channel(channel_id)
             if not channel: continue
-            
             try:
                 await channel.send(msg_content)
-                
                 if review_embeds:
                     if len(review_embeds) > 1:
-                        # 뷰는 채널마다 새로 생성해야 함 (상호작용을 위해)
-                        view = EmbedPaginator(review_embeds)
+                        view = EmbedPaginator(review_embeds, author=None)
                         await channel.send(embed=review_embeds[0], view=view)
                     else:
                         await channel.send(embed=review_embeds[0])
@@ -487,29 +461,23 @@ async def start_web_server():
 # [10. 도움말 (페이지네이션 적용)]
 # ==================================================================
 COMMAND_INFO = {
-    # 📋 프로젝트 관리
+    # ... (기존과 동일) ...
     "할일등록": {"desc": "새로운 할 일을 등록합니다.", "usage": "!할일등록 [프로젝트명] [내용]", "ex": "!할일등록 MVP 로그인구현"},
     "현황판": {"desc": "프로젝트 할 일 목록을 봅니다.", "usage": "!현황판 [프로젝트명(선택)]", "ex": "!현황판"},
     "완료": {"desc": "할 일을 완료 상태로 변경합니다.", "usage": "!완료 [ID]", "ex": "!완료 12"},
     "담당": {"desc": "할 일의 담당자를 지정합니다.", "usage": "!담당 [ID] [@멘션]", "ex": "!담당 12 @홍길동"},
-    
-    # 🎙️ 회의록
     "회의시작": {"desc": "대화 내용 기록을 시작합니다. (제목 자동 생성)", "usage": "!회의시작 [제목(선택)]", "ex": "!회의시작"},
     "회의종료": {"desc": "기록을 마치고 회의록/할일을 생성합니다.", "usage": "!회의종료", "ex": "!회의종료"},
     "회의목록": {"desc": "저장된 회의록 리스트를 봅니다.", "usage": "!회의목록", "ex": "!회의목록"},
     "회의조회": {"desc": "회의록 상세 내용과 링크를 봅니다.", "usage": "!회의조회 [ID]", "ex": "!회의조회 5"},
     "회의삭제": {"desc": "회의록을 삭제합니다.", "usage": "!회의삭제 [ID]", "ex": "!회의삭제 5"},
-
-    # 🐙 Github 연동
     "레포등록": {
-        "desc": "Github 레포지토리 알림을 현재 채널에 연결합니다.\n\n📢 **Webhook 설정 필수**:\nGithub 레포지토리 Settings > Webhooks > Add webhook에서\n1. **Payload URL**: `[봇서버주소]/github-webhook`\n2. **Content type**: `application/json` (필수!)\n3. **Events**: `Just the push event`",
+        "desc": "Github 레포지토리 알림을 연결합니다.\nwebhook: `[봇주소]/github-webhook`, `application/json`",
         "usage": "!레포등록 [Owner/Repo]",
         "ex": "!레포등록 google/guava"
     },
-    "레포삭제": {"desc": "현재 채널에서 레포지토리 연결을 해제합니다.", "usage": "!레포삭제 [Owner/Repo]", "ex": "!레포삭제 google/guava"},
+    "레포삭제": {"desc": "레포지토리 연결을 해제합니다.", "usage": "!레포삭제 [Owner/Repo]", "ex": "!레포삭제 google/guava"},
     "레포목록": {"desc": "현재 연결된 레포지토리 목록을 봅니다.", "usage": "!레포목록", "ex": "!레포목록"},
-
-    # 👑 권한 관리
     "초기설정": {"desc": "최초 관리자를 등록합니다. (1회용)", "usage": "!초기설정", "ex": "!초기설정"},
     "권한추가": {"desc": "봇 사용 권한을 부여합니다.", "usage": "!권한추가 [@멘션]", "ex": "!권한추가 @팀원"},
     "권한삭제": {"desc": "봇 사용 권한을 회수합니다.", "usage": "!권한삭제 [@멘션]", "ex": "!권한삭제 @팀원"}
@@ -551,7 +519,8 @@ async def help_cmd(ctx, cmd: str = None):
         embed3.add_field(name="!권한추가/삭제 [@멘션]", value="권한 부여/회수.", inline=False)
         embed3.set_footer(text="Page 3/3")
 
-        view = EmbedPaginator([embed1, embed2, embed3])
+        # [변경] author=ctx.author 전달
+        view = EmbedPaginator([embed1, embed2, embed3], author=ctx.author)
         await ctx.send(embed=embed1, view=view)
 
 # ==================================================================
