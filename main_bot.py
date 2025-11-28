@@ -53,7 +53,7 @@ github_headers = {
 # ==================================================================
 class EmbedPaginator(View):
     def __init__(self, embeds):
-        super().__init__(timeout=60)
+        super().__init__(timeout=120) # [수정] 타임아웃 2분으로 연장
         self.embeds = embeds
         self.current_page = 0
         self.update_buttons()
@@ -364,7 +364,7 @@ async def process_webhook_payload(data):
     for commit in commits:
         author = commit['author']['name']
         message = commit['message']
-        web_url = commit['url'] # 사용자에게 보여줄 클릭용 링크 ([github.com/](https://github.com/)...)
+        web_url = commit['url'] 
         commit_id = commit['id']
         short_id = commit_id[:7]
 
@@ -382,27 +382,47 @@ async def process_webhook_payload(data):
         
         await channel.send(msg)
 
-        # 4. [수정] Diff 가져오기 (API URL 생성)
+        # 4. Diff 가져오기 (API URL 생성)
         api_url = f"https://api.github.com/repos/{repo_name}/commits/{commit_id}"
-        print(api_url)
         
         diff_text = await get_github_diff(api_url)
         
         if diff_text:
             review_result = await ai.review_code(repo_name, author, message, diff_text)
             
+            # [수정] 리뷰 결과 페이지네이션 처리 (Markdown-aware Smart Chunking)
             chunks = []
             current_chunk = ""
-            
+            in_code_block = False
+            code_block_lang = ""
+
             for line in review_result.split('\n'):
-                if len(current_chunk) + len(line) + 1 > 1500:
-                    chunks.append(current_chunk)
-                    current_chunk = line
+                # 1. 길이 체크 (1500자 제한, 닫는 펜스 여유분 포함)
+                if len(current_chunk) + len(line) + 10 > 1500:
+                    if in_code_block:
+                        # 코드 블록 내부라면 닫아주고 청크 종료
+                        chunks.append(current_chunk + "\n```")
+                        # 다음 청크는 해당 언어로 다시 열기
+                        current_chunk = f"```{code_block_lang}\n{line}"
+                    else:
+                        chunks.append(current_chunk)
+                        current_chunk = line
                 else:
                     if current_chunk:
                         current_chunk += "\n" + line
                     else:
                         current_chunk = line
+                
+                # 2. 코드 블록 상태 추적
+                stripped = line.strip()
+                if stripped.startswith("```"):
+                    if in_code_block:
+                        in_code_block = False
+                        code_block_lang = ""
+                    else:
+                        in_code_block = True
+                        # ```python 등 언어 정보 추출
+                        code_block_lang = stripped.replace("```", "").strip()
             
             if current_chunk:
                 chunks.append(current_chunk)
