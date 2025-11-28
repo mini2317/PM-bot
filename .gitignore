@@ -1,5 +1,0 @@
-.venv
-src/key/bot_token
-src/key/gemini_key
-src/key/github_key
-pm_bot.db
