@@ -285,8 +285,41 @@ async def view_meeting(ctx, m_id: int):
         await ctx.send("❌ 해당 ID의 회의록이 없거나 이 서버의 회의가 아닙니다.")
         return
     name, date, summary, link = row
-    msg = f"**📂 {name} ({date})**\n🔗 [이동]({link})\n\n{summary}"
-    await ctx.send(msg)
+    
+    # [수정] 회의록 내용 페이지네이션 처리
+    chunks = []
+    current_chunk = ""
+    
+    for line in summary.split('\n'):
+        if len(current_chunk) + len(line) + 10 > 1500:
+            chunks.append(current_chunk)
+            current_chunk = line
+        else:
+            if current_chunk:
+                current_chunk += "\n" + line
+            else:
+                current_chunk = line
+    
+    if current_chunk:
+        chunks.append(current_chunk)
+        
+    embeds = []
+    for i, chunk in enumerate(chunks):
+        embed = discord.Embed(title=f"📂 {name} ({date})", description=chunk, color=0xf1c40f)
+        if link:
+             embed.add_field(name="링크", value=f"[대화 내용으로 이동]({link})", inline=False)
+             
+        if len(chunks) > 1:
+            embed.set_footer(text=f"Page {i+1}/{len(chunks)}")
+        embeds.append(embed)
+    
+    if len(embeds) > 1:
+        view = EmbedPaginator(embeds)
+        await ctx.send(embed=embeds[0], view=view)
+    elif embeds:
+        await ctx.send(embed=embeds[0])
+    else:
+        await ctx.send("내용이 없습니다.")
 
 @bot.command(name="회의삭제")
 @check_permission()
@@ -480,7 +513,11 @@ COMMAND_INFO = {
     "회의삭제": {"desc": "회의록을 삭제합니다.", "usage": "!회의삭제 [ID]", "ex": "!회의삭제 5"},
 
     # 🐙 Github 연동
-    "레포등록": {"desc": "Github 레포지토리 알림을 현재 채널에 연결합니다.", "usage": "!레포등록 [Owner/Repo]", "ex": "!레포등록 google/guava"},
+    "레포등록": {
+        "desc": "Github 레포지토리 알림을 현재 채널에 연결합니다.\n\n📢 **Webhook 설정 필수**:\nGithub 레포지토리 Settings > Webhooks > Add webhook에서\n1. **Payload URL**: `[봇서버주소]/github-webhook`\n2. **Content type**: `application/json` (필수!)\n3. **Events**: `Just the push event`",
+        "usage": "!레포등록 [Owner/Repo]",
+        "ex": "!레포등록 google/guava"
+    },
     "레포삭제": {"desc": "레포지토리 연결을 해제합니다.", "usage": "!레포삭제 [Owner/Repo]", "ex": "!레포삭제 google/guava"},
     "레포목록": {"desc": "현재 연결된 레포지토리 목록을 봅니다.", "usage": "!레포목록", "ex": "!레포목록"},
 

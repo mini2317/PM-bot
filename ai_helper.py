@@ -81,7 +81,7 @@ class AIHelper:
         GitHub Code Review.
         Repo: {repo}, Author: {author}, Msg: {msg}
         Diff: {diff[:15000]}
-        Language: 한국어로 의도와 개선사항을 체크해줘.
+        Language: 한국어로 의도와 개선사항을 체크해줘. 감정적 평가는 최대한 생략.
         """
         try:
             response = await asyncio.to_thread(self.model.generate_content, prompt)
