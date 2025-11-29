@@ -307,7 +307,7 @@ async def list_r(ctx):
     await ctx.send(embed=e)
 
 async def get_github_diff(url):
-    print(f"DEBUG: Diff {url}")
+    print(f"[DEBUG] Fetching Diff: {url}")
     async with aiohttp.ClientSession() as s:
         async with s.get(url, headers=github_headers) as r:
             if r.status==200:
@@ -322,13 +322,23 @@ async def get_github_diff(url):
                         if len(patch)>2500: patch=patch[:2500]+"\n...(Truncated)"
                         lines.append(f"📄 {fn}\n{patch}")
                 return "\n".join(lines)
+            else:
+                print(f"[DEBUG] Diff Fetch Error: {r.status}")
     return None
 
 async def proc_webhook(d):
-    if 'repository' not in d: return
+    print("[DEBUG] Processing Webhook payload...")
+    if 'repository' not in d: 
+        print("[DEBUG] No 'repository' in payload")
+        return
     rn = d['repository']['full_name']
     cids = db.get_repo_channels(rn)
-    if not cids: return
+    if not cids: 
+        print(f"[DEBUG] No channels found for repo: {rn}")
+        return
+    
+    print(f"[DEBUG] Channels to notify: {cids}")
+    
     for c in d.get('commits', []):
         msg = f"🚀 `{rn}` Commit: `{c['id'][:7]}`\n{c['message']}"
         matches = re.findall(r'(?:fix|close|resolve)\s*#(\d+)', c['message'], re.IGNORECASE)
@@ -341,7 +351,8 @@ async def proc_webhook(d):
         review_file = None
         review_embeds = []
 
-        if diff:
+        if diff and len(diff.strip()) > 0:
+            print("[DEBUG] Generating AI Review...")
             review = await ai.review_code(rn, c['author']['name'], c['message'], diff)
             md = f"# Review: {rn}\nCommit: {c['id']}\n\n{review}"
             review_file = io.BytesIO(md.encode()) # Will create File object later
@@ -351,6 +362,8 @@ async def proc_webhook(d):
                 e = discord.Embed(title="🤖 Review", description=ch, color=0x2ecc71)
                 e.set_footer(text=f"{i+1}/{len(chunks)}")
                 review_embeds.append(e)
+        else:
+            print("[DEBUG] No diff available or empty")
 
         for cid in cids:
             ch = bot.get_channel(cid)
@@ -365,14 +378,22 @@ async def proc_webhook(d):
                             await ch.send(embed=review_embeds[0], file=f)
                     elif diff is None or len(diff.strip()) == 0:
                         # [NEW] 분석 실패 메시지 전송
-                        fail_e = discord.Embed(title="⚠️ 분석 실패", description="변경 사항이 너무 많아 API에서 Diff를 제공하지 않았거나 분석할 내용이 없습니다.", color=0xe74c3c)
+                        fail_e = discord.Embed(title="⚠️ 분석 생략", description="변경 사항이 너무 많거나 분석할 코드가 없습니다.", color=0xe74c3c)
                         await ch.send(embed=fail_e)
                 except Exception as e: print(f"Err send {cid}: {e}")
+            else:
+                print(f"[DEBUG] Could not find channel {cid}")
 
 async def wh_handler(r):
+    print(f"[DEBUG] Webhook received! Method: {r.method}")
     if r.method=='GET': return web.Response(text="OK")
-    try: d=await r.json(); bot.loop.create_task(proc_webhook(d)); return web.Response(text="OK")
-    except: return web.Response(status=500)
+    try: 
+        d=await r.json()
+        bot.loop.create_task(proc_webhook(d))
+        return web.Response(text="OK")
+    except Exception as e: 
+        print(f"[DEBUG] Webhook Error: {e}")
+        return web.Response(status=500)
 
 async def start_server():
     app=web.Application(); app.router.add_route('*', WEBHOOK_PATH, wh_handler)
