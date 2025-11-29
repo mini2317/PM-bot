@@ -1,6 +1,6 @@
 import discord
 from discord.ext import commands
-from discord.ui import View, Button
+from discord.ui import View, Button, Select
 import os
 import aiohttp
 from aiohttp import web
@@ -49,14 +49,16 @@ github_headers = {
 }
 
 # ==================================================================
-# [3. UI 클래스 (페이지네이션 - 권한 체크 추가)]
+# [3. UI 클래스 (상호작용 뷰)]
 # ==================================================================
+
+# 3-1. Embed 페이지네이터 (도움말, 코드리뷰, 회의록 조회용)
 class EmbedPaginator(View):
     def __init__(self, embeds, author=None):
         super().__init__(timeout=120)
         self.embeds = embeds
         self.current_page = 0
-        self.author = author # 명령어를 입력한 사용자 저장
+        self.author = author
         self.update_buttons()
 
     def update_buttons(self):
@@ -64,9 +66,8 @@ class EmbedPaginator(View):
         self.children[1].disabled = (self.current_page == len(self.embeds) - 1)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        # author가 설정되어 있다면, 해당 유저인지 확인
         if self.author and interaction.user != self.author:
-            await interaction.response.send_message("🚫 이 버튼은 명령어를 입력한 사람만 누를 수 있습니다.", ephemeral=True)
+            await interaction.response.send_message("🚫 권한이 없습니다.", ephemeral=True)
             return False
         return True
 
@@ -81,6 +82,135 @@ class EmbedPaginator(View):
         self.current_page += 1
         self.update_buttons()
         await interaction.response.edit_message(embed=self.embeds[self.current_page], view=self)
+
+# 3-2. 상태 변경 확인 View (회의 종료 후 1단계)
+class StatusUpdateView(View):
+    def __init__(self, updates, author, next_callback):
+        super().__init__(timeout=180)
+        self.updates = updates
+        self.author = author
+        self.next_callback = next_callback # 다음 단계(새 프로젝트 확인)로 넘어가는 함수
+        self.selected_updates = []
+
+        options = []
+        for up in updates:
+            # up: {task_id, status, reason}
+            label = f"#{up['task_id']} → {up['status']}"
+            desc = up.get('reason', 'AI 제안')[:95]
+            options.append(discord.SelectOption(label=label, description=desc, value=str(up['task_id'])))
+
+        if len(options) > 25: options = options[:25]
+
+        select = Select(placeholder="상태를 변경할 작업을 선택하세요", min_values=0, max_values=len(options), options=options)
+        select.callback = self.select_callback
+        self.add_item(select)
+
+    async def select_callback(self, interaction: discord.Interaction):
+        select = [x for x in self.children if isinstance(x, Select)][0]
+        self.selected_updates = select.values
+        await interaction.response.defer()
+
+    @discord.ui.button(label="적용 및 다음", style=discord.ButtonStyle.primary)
+    async def apply_button(self, interaction: discord.Interaction, button: Button):
+        applied_count = 0
+        for tid_str in self.selected_updates:
+            tid = int(tid_str)
+            target_update = next((u for u in self.updates if u['task_id'] == tid), None)
+            if target_update:
+                db.update_task_status(tid, target_update['status'])
+                applied_count += 1
+        
+        await interaction.response.send_message(f"✅ {applied_count}개의 작업 상태를 변경했습니다.", ephemeral=True)
+        await interaction.message.edit(content="✅ 상태 변경 처리 완료.", view=None)
+        self.stop()
+        if self.next_callback: await self.next_callback(interaction.channel)
+
+    @discord.ui.button(label="건너뛰기", style=discord.ButtonStyle.grey)
+    async def skip_button(self, interaction: discord.Interaction, button: Button):
+        await interaction.message.edit(content="➡️ 상태 변경 건너뜀.", view=None)
+        self.stop()
+        if self.next_callback: await self.next_callback(interaction.channel)
+
+# 3-3. 새 프로젝트 생성 확인 View (회의 종료 후 2단계)
+class NewProjectView(View):
+    def __init__(self, new_projects, tasks_data, author, next_callback):
+        super().__init__(timeout=180)
+        self.new_projects = new_projects # list of project names
+        self.tasks_data = tasks_data
+        self.author = author
+        self.next_callback = next_callback # 다음 단계(할일 등록)로 넘어가는 함수
+
+    @discord.ui.button(label="새 프로젝트 생성 (추천)", style=discord.ButtonStyle.green)
+    async def create_btn(self, interaction: discord.Interaction, button: Button):
+        proj_list = ", ".join(self.new_projects)
+        await interaction.response.send_message(f"🆕 프로젝트 **{proj_list}** 생성 승인됨.", ephemeral=True)
+        await interaction.message.edit(content=f"✅ 새 프로젝트 **{proj_list}** 생성하기로 결정함.", view=None)
+        self.stop()
+        if self.next_callback: await self.next_callback(interaction.channel, self.tasks_data)
+
+    @discord.ui.button(label="생성 안함 (기존 '회의도출' 사용)", style=discord.ButtonStyle.red)
+    async def no_btn(self, interaction: discord.Interaction, button: Button):
+        # tasks_data의 project를 모두 '회의도출'로 변경
+        for t in self.tasks_data:
+            if t.get('is_new_project'):
+                t['project'] = "회의도출"
+        
+        await interaction.response.send_message("👌 새 프로젝트를 만들지 않고 '회의도출'로 통합합니다.", ephemeral=True)
+        await interaction.message.edit(content="🚫 새 프로젝트 생성 거절됨.", view=None)
+        self.stop()
+        if self.next_callback: await self.next_callback(interaction.channel, self.tasks_data)
+
+# 3-4. 할 일 최종 등록 View (회의 종료 후 3단계)
+class TaskSelectionView(View):
+    def __init__(self, tasks_data, meeting_id, author):
+        super().__init__(timeout=300)
+        self.tasks_data = tasks_data
+        self.meeting_id = meeting_id
+        self.author = author
+        self.selected_indices = []
+
+        options = []
+        for i, task in enumerate(tasks_data):
+            content = task.get('content', '내용 없음')
+            project = task.get('project', '미정')
+            assignee = task.get('assignee_hint', '')
+            
+            # 라벨 구성: [프로젝트] 내용
+            label_text = f"[{project}] {content}"
+            if len(label_text) > 100: label_text = label_text[:97] + "..."
+            
+            desc = f"담당: {assignee}" if assignee else "담당 미정"
+            options.append(discord.SelectOption(label=label_text, description=desc, value=str(i)))
+
+        if len(options) > 25: options = options[:25]
+
+        select = Select(placeholder="등록할 할 일을 선택하세요 (다중 선택 가능)", min_values=0, max_values=len(options), options=options)
+        select.callback = self.select_callback
+        self.add_item(select)
+
+    async def select_callback(self, interaction: discord.Interaction):
+        select = [x for x in self.children if isinstance(x, Select)][0]
+        self.selected_indices = [int(v) for v in select.values]
+        await interaction.response.defer()
+
+    @discord.ui.button(label="저장", style=discord.ButtonStyle.green, emoji="💾")
+    async def save_button(self, interaction: discord.Interaction, button: Button):
+        if not self.selected_indices:
+            return await interaction.response.send_message("⚠️ 선택된 항목이 없습니다.", ephemeral=True)
+
+        count = 0
+        for idx in self.selected_indices:
+            t = self.tasks_data[idx]
+            db.add_task(t.get('project', '회의도출'), t['content'], source_meeting_id=self.meeting_id)
+            count += 1
+        
+        await interaction.response.edit_message(content=f"✅ **{count}개**의 할 일이 등록되었습니다!", view=None)
+        self.stop()
+
+    @discord.ui.button(label="취소", style=discord.ButtonStyle.grey)
+    async def cancel_button(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.edit_message(content="❌ 취소됨.", view=None)
+        self.stop()
 
 # ==================================================================
 # [4. 권한 체크 데코레이터]
@@ -198,7 +328,7 @@ async def assign_task_cmd(ctx, task_id: int, member: discord.Member):
     else: await ctx.send("❌ ID 확인 불가")
 
 # ==================================================================
-# [8. 회의록 시스템]
+# [8. 회의록 시스템 (인터랙티브 등록 Flow 포함)]
 # ==================================================================
 @bot.command(name="회의시작")
 @check_permission()
@@ -233,14 +363,15 @@ async def stop_meeting(ctx):
         await ctx.send("📝 대화 내용이 없어 저장하지 않습니다.")
         return
 
+    # 대화 내용 포맷팅
     formatted_transcript = ""
     for msg in raw_messages:
         formatted_transcript += f"[Speaker: {msg['user']} | Time: {msg['time']}] {msg['content']}\n"
 
-    waiting = await ctx.send("🤖 AI가 회의를 분석하고 제목을 짓고 있습니다...")
+    waiting = await ctx.send("🤖 AI가 회의를 분석하고 있습니다... (제목 생성, 할일 추출, 상태 변경 감지)")
 
+    # 1. AI 요약 & 제목 생성
     full_result = await ai.generate_meeting_summary(formatted_transcript)
-    
     lines = full_result.strip().split('\n')
     if lines[0].startswith("제목:"):
         final_title = lines[0].replace("제목:", "").strip()
@@ -249,27 +380,57 @@ async def stop_meeting(ctx):
         final_title = f"{datetime.datetime.now().strftime('%Y-%m-%d')} 회의"
         summary_body = full_result
 
+    # DB 저장
     m_id = db.save_meeting(ctx.guild.id, final_title, ctx.channel.id, summary_body, data['jump_url'])
     
-    extracted_tasks = await ai.extract_tasks_from_meeting(formatted_transcript)
-    task_text = ""
-    for task in extracted_tasks:
-        content = task.get('content', '내용 없음')
-        assignee = task.get('assignee_hint', '')
-        t_id = db.add_task("회의도출", content, source_meeting_id=m_id)
-        task_text += f"• **#{t_id}** {content} (추정: {assignee})\n"
+    # 2. AI 할 일 & 상태 변경 추출 (Context 제공)
+    existing_projects = db.get_all_projects()
+    active_tasks = db.get_active_tasks_simple()
+    
+    ai_data = await ai.extract_tasks_and_updates(formatted_transcript, existing_projects, active_tasks)
+    
+    new_tasks = ai_data.get('new_tasks', [])
+    updates = ai_data.get('updates', [])
 
     await waiting.delete()
 
+    # 요약 결과 전송
     embed = discord.Embed(title=f"✅ 회의 종료: {final_title}", color=0x2ecc71)
     embed.add_field(name="📄 요약본", value=summary_body[:500] + ("..." if len(summary_body)>500 else ""), inline=False)
-    
-    if task_text:
-        embed.add_field(name="⚡ 도출된 Action Items (자동등록됨)", value=task_text, inline=False)
-    
+    embed.add_field(name="AI 분석 결과", value=f"추출된 할 일: {len(new_tasks)}개\n감지된 변경사항: {len(updates)}개", inline=False)
     embed.add_field(name="관리", value=f"ID: `{m_id}` | `!회의조회 {m_id}`", inline=False)
-    
     await ctx.send(embed=embed)
+
+    # -----------------------------------------------------------
+    # [Step-by-Step Interactive Flow]
+    # -----------------------------------------------------------
+    
+    # Step 3 내부 함수: 할 일 등록 뷰 실행
+    async def step3_add_tasks(channel, final_tasks):
+        if not final_tasks:
+            await channel.send("💡 등록할 새로운 할 일이 없습니다.")
+            return
+        view = TaskSelectionView(final_tasks, m_id, ctx.author)
+        await channel.send("📝 **최종적으로 등록할 할 일을 선택해주세요:**", view=view)
+
+    # Step 2 내부 함수: 새 프로젝트 확인
+    async def step2_check_projects(channel):
+        # 새로운 프로젝트 이름만 추출
+        new_proj_names = list(set([t['project'] for t in new_tasks if t.get('is_new_project')]))
+        
+        if new_proj_names:
+            view = NewProjectView(new_proj_names, new_tasks, ctx.author, step3_add_tasks)
+            await channel.send(f"🆕 AI가 새로운 프로젝트 **{new_proj_names}** 생성을 제안했습니다.\n이 이름으로 프로젝트를 만들까요?", view=view)
+        else:
+            await step3_add_tasks(channel, new_tasks)
+
+    # Step 1: 상태 변경 확인 (가장 먼저 실행)
+    if updates:
+        view = StatusUpdateView(updates, ctx.author, step2_check_projects)
+        await ctx.send("🔄 **기존 할 일의 상태 변경이 감지되었습니다.**\n적용할 항목을 선택해주세요:", view=view)
+    else:
+        # 변경사항 없으면 바로 프로젝트 확인으로 이동
+        await step2_check_projects(ctx.channel)
 
 @bot.command(name="회의목록")
 @check_permission()
@@ -281,7 +442,7 @@ async def list_meetings(ctx):
     embed = discord.Embed(title=f"📂 {ctx.guild.name} 회의록 목록", color=0xf1c40f)
     for row in rows:
         m_id, name, date, summary, link = row
-        val = f"📅 {date} | 🔗 [이동]({link})\n📝 {summary.splitlines()[0][:30]}..." if summary else "요약 없음"
+        val = f"📅 {date} | 🔗 [대화내용 이동]({link})"
         embed.add_field(name=f"ID [{m_id}] {name}", value=val, inline=False)
     await ctx.send(embed=embed)
 
@@ -312,7 +473,6 @@ async def view_meeting(ctx, m_id: int):
         if len(chunks) > 1: embed.set_footer(text=f"Page {i+1}/{len(chunks)}")
         embeds.append(embed)
     
-    # [변경] author=ctx.author 전달
     if len(embeds) > 1:
         view = EmbedPaginator(embeds, author=ctx.author)
         await ctx.send(embed=embeds[0], view=view)
@@ -339,20 +499,25 @@ async def get_github_diff(api_url):
             if resp.status == 200:
                 data = await resp.json()
                 diff_lines = []
+                
                 ignored_files = ['package-lock.json', 'yarn.lock', 'poetry.lock', 'Gemfile.lock']
                 ignored_exts = ('.svg', '.png', '.jpg', '.jpeg', '.gif', '.ico', '.pdf')
 
                 for file in data.get('files', []):
                     filename = file['filename']
+                    
                     if filename in ignored_files or filename.endswith(ignored_exts):
                         diff_lines.append(f"📄 File: {filename} (Skipped: Auto-generated/Asset)")
                         continue
+
                     patch = file.get('patch', None)
                     if not patch:
                         diff_lines.append(f"📄 File: {filename} (Skipped: Binary or Too Large)")
                         continue
+                    
                     if len(patch) > 2500:
                         patch = patch[:2500] + "\n... (Diff truncated due to length) ..."
+                    
                     diff_lines.append(f"📄 File: {filename}\n{patch}\n")
                 
                 return "\n".join(diff_lines)
@@ -362,6 +527,7 @@ async def get_github_diff(api_url):
 
 async def process_webhook_payload(data):
     if 'repository' not in data: return
+    
     repo_name = data['repository']['full_name']
     target_channel_ids = db.get_repo_channels(repo_name)
     if not target_channel_ids:
@@ -394,6 +560,7 @@ async def process_webhook_payload(data):
         review_embeds = []
         if diff_text:
             review_result = await ai.review_code(repo_name, author, message, diff_text)
+            
             chunks = []
             current_chunk = ""
             in_code_block = False
@@ -408,20 +575,28 @@ async def process_webhook_payload(data):
                         chunks.append(current_chunk)
                         current_chunk = line
                 else:
-                    if current_chunk: current_chunk += "\n" + line
-                    else: current_chunk = line
+                    if current_chunk:
+                        current_chunk += "\n" + line
+                    else:
+                        current_chunk = line
                 
                 stripped = line.strip()
                 if stripped.startswith("```"):
-                    if in_code_block: in_code_block = False; code_block_lang = ""
-                    else: in_code_block = True; code_block_lang = stripped.replace("```", "").strip()
+                    if in_code_block:
+                        in_code_block = False
+                        code_block_lang = ""
+                    else:
+                        in_code_block = True
+                        code_block_lang = stripped.replace("```", "").strip()
             
-            if current_chunk: chunks.append(current_chunk)
+            if current_chunk:
+                chunks.append(current_chunk)
             
             for i, chunk in enumerate(chunks):
                 embed = discord.Embed(title=f"🤖 Code Review ({short_id})", url=web_url, color=0x2ecc71)
                 embed.description = chunk
-                if len(chunks) > 1: embed.set_footer(text=f"Page {i+1}/{len(chunks)}")
+                if len(chunks) > 1:
+                    embed.set_footer(text=f"Page {i+1}/{len(chunks)}")
                 review_embeds.append(embed)
 
         for channel_id in target_channel_ids:
@@ -429,6 +604,7 @@ async def process_webhook_payload(data):
             if not channel: continue
             try:
                 await channel.send(msg_content)
+                
                 if review_embeds:
                     if len(review_embeds) > 1:
                         view = EmbedPaginator(review_embeds, author=None)
@@ -458,26 +634,32 @@ async def start_web_server():
     print(f"🌍 Webhook Server running on port {WEBHOOK_PORT}")
 
 # ==================================================================
-# [10. 도움말 (페이지네이션 적용)]
+# [10. 도움말]
 # ==================================================================
 COMMAND_INFO = {
-    # ... (기존과 동일) ...
-    "할일등록": {"desc": "새로운 할 일을 등록합니다.", "usage": "!할일등록 [프로젝트명] [내용]", "ex": "!할일등록 MVP 로그인구현"},
+    # 📋 프로젝트 관리
+    "할일등록": {"desc": "새로운 할 일을 등록합니다.\n띄어쓰기가 있는 프로젝트명은 \"\"로 감싸주세요.", "usage": "!할일등록 [\"프로젝트명\"] [내용]", "ex": "!할일등록 \"MVP 개발\" 로그인구현"},
     "현황판": {"desc": "프로젝트 할 일 목록을 봅니다.", "usage": "!현황판 [프로젝트명(선택)]", "ex": "!현황판"},
     "완료": {"desc": "할 일을 완료 상태로 변경합니다.", "usage": "!완료 [ID]", "ex": "!완료 12"},
     "담당": {"desc": "할 일의 담당자를 지정합니다.", "usage": "!담당 [ID] [@멘션]", "ex": "!담당 12 @홍길동"},
+    
+    # 🎙️ 회의록
     "회의시작": {"desc": "대화 내용 기록을 시작합니다. (제목 자동 생성)", "usage": "!회의시작 [제목(선택)]", "ex": "!회의시작"},
     "회의종료": {"desc": "기록을 마치고 회의록/할일을 생성합니다.", "usage": "!회의종료", "ex": "!회의종료"},
     "회의목록": {"desc": "저장된 회의록 리스트를 봅니다.", "usage": "!회의목록", "ex": "!회의목록"},
     "회의조회": {"desc": "회의록 상세 내용과 링크를 봅니다.", "usage": "!회의조회 [ID]", "ex": "!회의조회 5"},
     "회의삭제": {"desc": "회의록을 삭제합니다.", "usage": "!회의삭제 [ID]", "ex": "!회의삭제 5"},
+
+    # 🐙 Github 연동
     "레포등록": {
         "desc": "Github 레포지토리 알림을 연결합니다.\nwebhook: `[봇주소]/github-webhook`, `application/json`",
         "usage": "!레포등록 [Owner/Repo]",
         "ex": "!레포등록 google/guava"
     },
-    "레포삭제": {"desc": "레포지토리 연결을 해제합니다.", "usage": "!레포삭제 [Owner/Repo]", "ex": "!레포삭제 google/guava"},
+    "레포삭제": {"desc": "현재 채널에서 레포지토리 연결을 해제합니다.", "usage": "!레포삭제 [Owner/Repo]", "ex": "!레포삭제 google/guava"},
     "레포목록": {"desc": "현재 연결된 레포지토리 목록을 봅니다.", "usage": "!레포목록", "ex": "!레포목록"},
+
+    # 👑 권한 관리
     "초기설정": {"desc": "최초 관리자를 등록합니다. (1회용)", "usage": "!초기설정", "ex": "!초기설정"},
     "권한추가": {"desc": "봇 사용 권한을 부여합니다.", "usage": "!권한추가 [@멘션]", "ex": "!권한추가 @팀원"},
     "권한삭제": {"desc": "봇 사용 권한을 회수합니다.", "usage": "!권한삭제 [@멘션]", "ex": "!권한삭제 @팀원"}
@@ -497,7 +679,7 @@ async def help_cmd(ctx, cmd: str = None):
             await ctx.send(f"❌ `{cmd}` 명령어를 찾을 수 없습니다.")
     else:
         embed1 = discord.Embed(title="📋 프로젝트 관리 명령어", description="할 일과 프로젝트를 관리하세요.", color=0x3498db)
-        embed1.add_field(name="!할일등록 [프로젝트] [내용]", value="새로운 할 일을 등록합니다.", inline=False)
+        embed1.add_field(name="!할일등록 [프로젝트] [내용]", value="할 일을 등록합니다. (띄어쓰기는 \"\" 사용)", inline=False)
         embed1.add_field(name="!현황판 [프로젝트(선택)]", value="칸반 보드를 보여줍니다.", inline=False)
         embed1.add_field(name="!완료 [ID]", value="할 일을 완료 처리합니다.", inline=False)
         embed1.add_field(name="!담당 [ID] [@멘션]", value="담당자를 지정합니다.", inline=False)
@@ -505,7 +687,7 @@ async def help_cmd(ctx, cmd: str = None):
 
         embed2 = discord.Embed(title="🎙️ 회의 시스템 명령어", description="회의를 기록하고 AI로 요약하세요.", color=0xe74c3c)
         embed2.add_field(name="!회의시작 [제목(선택)]", value="기록을 시작합니다.", inline=False)
-        embed2.add_field(name="!회의종료", value="기록을 끝내고 요약본을 만듭니다.", inline=False)
+        embed2.add_field(name="!회의종료", value="기록을 끝내고 할 일을 추출합니다.", inline=False)
         embed2.add_field(name="!회의목록", value="저장된 회의록을 봅니다.", inline=False)
         embed2.add_field(name="!회의조회 [ID]", value="상세 내용을 확인합니다.", inline=False)
         embed2.add_field(name="!회의삭제 [ID]", value="회의록을 삭제합니다.", inline=False)
@@ -519,7 +701,6 @@ async def help_cmd(ctx, cmd: str = None):
         embed3.add_field(name="!권한추가/삭제 [@멘션]", value="권한 부여/회수.", inline=False)
         embed3.set_footer(text="Page 3/3")
 
-        # [변경] author=ctx.author 전달
         view = EmbedPaginator([embed1, embed2, embed3], author=ctx.author)
         await ctx.send(embed=embed1, view=view)
 
