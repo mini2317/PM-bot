@@ -1,10 +1,13 @@
 import discord
 from discord.ext import commands
+from discord.ui import View, Button, Select
 import os
 import aiohttp
 from aiohttp import web
 import asyncio
 import re
+from database import DBManager
+from ai_helper import AIHelper
 import datetime
 import json
 import io
@@ -29,7 +32,7 @@ def load_key(filename):
 DISCORD_TOKEN = load_key("bot_token")
 GEMINI_API_KEY = load_key("gemini_key")
 GITHUB_TOKEN = load_key("github_key")
-OWNER_ID = load_key("owner_id") # [NEW] 봇 소유자 ID 로드
+OWNER_ID = load_key("owner_id") 
 
 WEBHOOK_PORT = 8080
 WEBHOOK_PATH = "/github-webhook"
@@ -101,7 +104,10 @@ def check_permission():
         await ctx.send("🚫 권한 없음"); return False
     return commands.check(predicate)
 
-# !초기설정 삭제됨 (자동화)
+@bot.command(name="초기설정")
+async def init_admin(ctx):
+    if db.add_user(ctx.author.id, ctx.author.name, "admin"): await ctx.send(f"👑 {ctx.author.mention} 관리자 등록")
+    else: await ctx.send("이미 존재")
 
 @bot.command(name="권한추가")
 @check_permission()
@@ -350,14 +356,17 @@ async def proc_webhook(d):
             ch = bot.get_channel(cid)
             if ch:
                 try:
-                    # BytesIO position reset needed or create new for each
-                    f_send = discord.File(io.BytesIO(review_file.getvalue()), filename="Review.md") if review_file else None
+                    await ch.send(msg)
                     if review_embeds:
+                        f = discord.File(io.BytesIO(review_file.getvalue()), filename="Review.md")
                         if len(review_embeds)>1: 
-                            await ch.send(msg, embed=review_embeds[0], view=EmbedPaginator(review_embeds), file=f_send)
+                            await ch.send(embed=review_embeds[0], view=EmbedPaginator(review_embeds), file=f)
                         else: 
-                            await ch.send(msg, embed=review_embeds[0], file=f_send)
-                    else: await ch.send(msg)
+                            await ch.send(embed=review_embeds[0], file=f)
+                    elif diff is None or len(diff.strip()) == 0:
+                        # [NEW] 분석 실패 메시지 전송
+                        fail_e = discord.Embed(title="⚠️ 분석 실패", description="변경 사항이 너무 많아 API에서 Diff를 제공하지 않았거나 분석할 내용이 없습니다.", color=0xe74c3c)
+                        await ch.send(embed=fail_e)
                 except Exception as e: print(f"Err send {cid}: {e}")
 
 async def wh_handler(r):
@@ -372,32 +381,19 @@ async def start_server():
 
 @bot.command(name="도움말")
 async def help(ctx, cmd: str = None):
-    # [변경] JSON 데이터 기반 상세 도움말 + Embed 목록
     if cmd:
         info = COMMAND_INFO.get(cmd)
         if info:
             e = discord.Embed(title=f"❓ !{cmd}", color=0x00ff00)
             e.add_field(name="설명", value=info['desc'], inline=False)
             e.add_field(name="사용법", value=f"`{info['usage']}`", inline=False)
-            e.add_field(name="예시", value=f"`{info['ex']}`", inline=False)
             await ctx.send(embed=e)
-        else: await ctx.send("❌ 해당 명령어에 대한 도움말이 없습니다.")
+        else: await ctx.send("❌ 없음")
     else:
-        # 카테고리별로 명령어 목록 생성 (간단 설명 포함)
-        def make_embed(title, cmds, color):
-            e = discord.Embed(title=title, color=color)
-            for c in cmds:
-                info = COMMAND_INFO.get(c, {})
-                # desc의 첫 줄만 가져와서 한 줄 요약으로 표시
-                short_desc = info.get('desc', '설명 없음').split('\n')[0]
-                e.add_field(name=f"!{c}", value=short_desc, inline=False)
-            return e
-
-        e1 = make_embed("📋 프로젝트 관리", ["프로젝트생성", "상위설정", "프로젝트구조", "할일등록", "현황판", "완료", "담당"], 0x3498db)
-        e2 = make_embed("🎙️ 회의 시스템", ["회의시작", "회의종료", "회의목록", "회의조회", "회의삭제"], 0xe74c3c)
-        e3 = make_embed("🐙 깃헙 & 관리", ["레포등록", "레포삭제", "레포목록", "초기설정", "권한추가", "권한삭제"], 0x9b59b6)
-        e3.set_footer(text="!도움말 [명령어] 로 상세 정보를 확인하세요.")
-        
+        e1 = discord.Embed(title="📋 프로젝트", description="!프로젝트생성, !상위설정, !프로젝트구조\n!할일등록, !현황판, !완료, !담당", color=0x3498db)
+        e2 = discord.Embed(title="🎙️ 회의", description="!회의시작, !회의종료\n!회의목록, !회의조회, !회의삭제", color=0xe74c3c)
+        e3 = discord.Embed(title="🐙 깃헙/관리", description="!레포등록, !레포삭제, !레포목록\n!초기설정, !권한추가, !권한삭제", color=0x9b59b6)
+        e3.set_footer(text="Page 1/3")
         view = EmbedPaginator([e1, e2, e3], ctx.author)
         await ctx.send(embed=e1, view=view)
 
@@ -411,23 +407,11 @@ async def on_message(msg):
 @bot.event
 async def on_ready():
     print(f'Logged in {bot.user}')
-    # [NEW] 봇 켜질 때 Owner 자동 관리자 등록
     if OWNER_ID:
         try:
-            # 봇이 볼 수 있는 멤버인지 확인은 어렵지만 DB에는 ID만 있으면 됨
-            # 이름은 API 호출 없이 알 수 없으므로 'Owner' 등 임시값 또는 fetch 사용
-            # 여기서는 안전하게 fetch 시도 (실패시 ID로 저장)
-            try:
-                owner_user = await bot.fetch_user(int(OWNER_ID))
-                name = owner_user.name
-            except:
-                name = "Owner"
-            
-            if db.ensure_admin(int(OWNER_ID), name):
-                print(f"✅ Owner({name}) automatically registered as Admin.")
-        except Exception as e:
-            print(f"⚠️ Failed to register owner: {e}")
-            
+            u = await bot.fetch_user(int(OWNER_ID))
+            if db.ensure_admin(u.id, u.name): print(f"✅ Owner {u.name} registered")
+        except: print("⚠️ Owner register failed")
     await start_server()
 
 if __name__ == "__main__": 
