@@ -11,79 +11,78 @@ class AIHelper:
         else:
             self.model = None
 
-    async def generate_meeting_summary(self, formatted_transcript):
-        """
-        [변경] 구조화된 대화 로그를 기반으로 요약 및 제목 생성
-        formatted_transcript 예시:
-        [Speaker: 홍길동 | Time: 12:00] 안녕하세요
-        [Speaker: 김철수 | Time: 12:01] 반갑습니다
-        """
+    async def generate_meeting_summary(self, transcript):
+        """회의록 텍스트 요약 및 제목 생성"""
         if not self.model: return "제목: 알 수 없음\n\nAPI 키가 없습니다."
 
         prompt = f"""
-        당신은 전문 프로젝트 매니저(PM)입니다. 
-        아래 제공되는 회의 대화 로그는 `[Speaker: 이름 | Time: 시간] 발언 내용` 형식으로 구조화되어 있습니다.
-        이 정보를 바탕으로 **누가 어떤 의견을 냈는지** 맥락을 정확히 파악하여 회의록을 작성하세요.
+        [대화 스크립트]:
+        {transcript}
 
-        [대화 로그]:
-        {formatted_transcript}
-
-        [요청 사항]
-        1. **가장 적절한 '회의 제목'**을 첫 줄에 작성하세요. (형식: "제목: [제목내용]")
-        2. 그 다음 줄부터 **회의록**을 작성하세요.
-        3. 요약 시, 중요한 결정 사항에는 발언자 이름을 괄호 안에 명시하세요. 예: "API 스펙 확정 (김철수)"
-
-        [출력 예시]
-        제목: 11월 4주차 로그인 API 설계 회의
-        
-        # 📅 회의록
-        ## 1. 3줄 요약
-        ...
+        위 내용을 분석해서 **가장 적절한 '회의 제목'**과 **'회의록'**을 작성해줘.
+        첫 줄은 반드시 "제목: [AI가 추천하는 제목]" 형식이어야 해.
         """
         try:
             response = await asyncio.to_thread(self.model.generate_content, prompt)
             return response.text
         except Exception as e:
-            return f"제목: 에러 발생\n\n오류 내용: {e}"
+            return f"제목: 에러 발생\n\n{e}"
 
-    async def extract_tasks_from_meeting(self, formatted_transcript):
-        """구조화된 로그에서 할 일 추출"""
-        if not self.model: return []
+    async def extract_tasks_and_updates(self, transcript, existing_projects, active_tasks):
+        """
+        [NEW] 할 일 추출 및 상태 변경 감지 통합 함수
+        - transcript: 회의 대화 내용
+        - existing_projects: 현재 존재하는 프로젝트 이름 리스트
+        - active_tasks: 현재 진행 중인 태스크 리스트 [{'id', 'content', 'status'}]
+        """
+        if not self.model: return {"new_tasks": [], "updates": []}
+
+        # 컨텍스트 정보 문자열 변환
+        projects_str = ", ".join(existing_projects) if existing_projects else "(없음)"
+        tasks_str = json.dumps(active_tasks, ensure_ascii=False)
 
         prompt = f"""
-        아래 회의 대화 내용을 분석해서 '할 일(Action Items)'을 추출해줘.
-        대화는 `[Speaker: 이름]` 형식으로 구분되어 있으니, 이를 참고하여 **담당자(assignee_hint)**를 최대한 추론해줘.
-        
-        [대화 로그]:
-        {formatted_transcript}
+        당신은 프로젝트 매니저입니다. 회의 대화 내용을 분석하여 다음 두 가지를 수행하세요.
 
-        [출력 형식]: JSON 리스트만 출력 (마크다운 없이).
-        [
-            {{"content": "로그인 페이지 UI 디자인", "assignee_hint": "김철수"}},
-            {{"content": "API 명세서 작성", "assignee_hint": ""}}
-        ]
+        1. **새로운 할 일(New Tasks) 추출**:
+           - 대화에서 도출된 액션 아이템을 뽑아주세요.
+           - `project`: 기존 프로젝트 목록({projects_str}) 중 가장 적절한 것을 고르세요.
+           - 만약 기존 프로젝트에 어울리는 게 없다면, **새로운 프로젝트 이름**을 제안하세요.
+           - `assignee_hint`: 담당자가 언급되었다면 이름을 적으세요.
+
+        2. **상태 변경(Updates) 감지**:
+           - 기존 할 일 목록({tasks_str})을 참고하여, 회의 중 완료되었거나 상태가 바뀐 업무가 있다면 찾으세요.
+           - 예: "로그인 기능 다 했어요" -> ID X번 Task Status 'DONE' 제안.
+
+        [대화 내용]:
+        {transcript}
+
+        [출력 형식]: 반드시 아래 **JSON 포맷**으로만 출력하세요. (마크다운 없이)
+        {{
+            "new_tasks": [
+                {{"content": "할 일 내용", "project": "프로젝트명", "assignee_hint": "이름", "is_new_project": true/false}}
+            ],
+            "updates": [
+                {{"task_id": 123, "status": "DONE", "reason": "회의 중 완료 언급됨"}}
+            ]
+        }}
         """
         try:
             response = await asyncio.to_thread(self.model.generate_content, prompt)
             text = response.text
+            # JSON 파싱 (```json 제거 등)
             text = re.sub(r'```json\s*', '', text)
             text = re.sub(r'```\s*', '', text)
             text = text.strip()
-            tasks = json.loads(text)
-            return tasks
+            return json.loads(text)
         except Exception as e:
-            print(f"Task Extraction Error: {e}")
-            return []
+            print(f"AI Extraction Error: {e}")
+            return {"new_tasks": [], "updates": []}
 
     async def review_code(self, repo, author, msg, diff):
+        # (기존 코드와 동일)
         if not self.model: return "❌ API Key Missing"
-        prompt = f"""
-        GitHub Code Review.
-        Repo: {repo}, Author: {author}, Msg: {msg}
-        Diff: {diff[:15000]}
-        Language: 한국어로 의도와 개선사항을 체크해줘. 감정적 평가는 최대한 생략.
-        """
+        prompt = f"GitHub Review.\nRepo:{repo}, User:{author}, Msg:{msg}\nDiff:{diff[:15000]}\nKorean response."
         try:
-            response = await asyncio.to_thread(self.model.generate_content, prompt)
-            return response.text
-        except: return "Error generating review."
+            return (await asyncio.to_thread(self.model.generate_content, prompt)).text
+        except: return "Error"
