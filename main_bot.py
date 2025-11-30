@@ -3,11 +3,8 @@ from discord.ext import commands
 import os
 import aiohttp
 from aiohttp import web
-import asyncio
 import re
 import io
-import json
-
 from database import DBManager
 from ai_helper import AIHelper
 from ui_components import EmbedPaginator
@@ -33,18 +30,15 @@ intents.message_content = True
 intents.members = True
 
 bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
-
-# 전역 객체 할당 (Cog에서 접근 가능하도록)
 bot.db = DBManager()
 bot.ai = AIHelper(GEMINI_API_KEY)
 bot.github_headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
 
-# [Webhook Logic - 글로벌 유지]
-# 웹훅 처리는 봇의 핵심 이벤트 루프와 강하게 결합되어 있어 메인에 두는 것이 안정적입니다.
-async def get_github_diff(api_url):
-    print(f"[DEBUG] Diff: {api_url}")
+# [Webhook Handler]
+async def get_github_diff(url):
+    print(f"[DEBUG] Diff: {url}")
     async with aiohttp.ClientSession() as s:
-        async with s.get(api_url, headers=bot.github_headers) as r:
+        async with s.get(url, headers=bot.github_headers) as r:
             if r.status==200:
                 d = await r.json(); lines = []
                 ignores = ['lock', '.png', '.jpg', '.svg', '.pdf']
@@ -59,13 +53,13 @@ async def get_github_diff(api_url):
                 return "\n".join(lines)
     return None
 
-async def process_webhook(data):
-    if 'repository' not in data: return
-    rn = data['repository']['full_name']
+async def proc_webhook(d):
+    if 'repository' not in d: return
+    rn = d['repository']['full_name']
     cids = bot.db.get_repo_channels(rn)
     if not cids: return
     
-    for c in data.get('commits', []):
+    for c in d.get('commits', []):
         msg = f"🚀 `{rn}` Commit: `{c['id'][:7]}`\n{c['message']}"
         closed = []
         for t in re.findall(r'(?:fix|close|resolve)\s*#(\d+)', c['message'], re.IGNORECASE):
@@ -89,24 +83,23 @@ async def process_webhook(data):
             ch = bot.get_channel(cid)
             if ch:
                 try:
+                    # 파일 객체 재생성 (전송 시 닫힘 방지)
+                    f_send = discord.File(io.BytesIO(review_file.getvalue()), filename="Review.md") if review_file else None
                     await ch.send(msg)
                     if review_embeds:
-                        f = discord.File(io.BytesIO(review_file.getvalue()), filename="Review.md")
-                        if len(review_embeds)>1: 
-                            await ch.send(embed=review_embeds[0], view=EmbedPaginator(review_embeds), file=f)
-                        else: 
-                            await ch.send(embed=review_embeds[0], file=f)
+                        if len(review_embeds)>1: await ch.send(embed=review_embeds[0], view=EmbedPaginator(review_embeds), file=f_send)
+                        else: await ch.send(embed=review_embeds[0], file=f_send)
                     elif diff is None:
-                        await ch.send(embed=discord.Embed(title="⚠️ 분석 생략", description="변경량이 너무 많습니다.", color=0xe74c3c))
+                        await ch.send(embed=discord.Embed(title="⚠️ 분석 생략", description="변경량 과다", color=0xe74c3c))
                 except Exception as e: print(f"Err {cid}: {e}")
 
-async def webhook_handler(r):
+async def wh_handler(r):
     if r.method=='GET': return web.Response(text="OK")
-    try: d=await r.json(); bot.loop.create_task(process_webhook(d)); return web.Response(text="OK")
+    try: d=await r.json(); bot.loop.create_task(proc_webhook(d)); return web.Response(text="OK")
     except: return web.Response(status=500)
 
 async def start_server():
-    app=web.Application(); app.router.add_route('*', WEBHOOK_PATH, webhook_handler)
+    app=web.Application(); app.router.add_route('*', WEBHOOK_PATH, wh_handler)
     r=web.AppRunner(app); await r.setup(); s=web.TCPSite(r,'0.0.0.0',WEBHOOK_PORT); await s.start()
     print(f"🌍 Webhook: {WEBHOOK_PORT}")
 
@@ -116,12 +109,17 @@ async def on_ready():
     print(f'Logged in {bot.user}')
     
     # Load Cogs
-    await bot.load_extension("cogs.meeting")
-    await bot.load_extension("cogs.project")
-    await bot.load_extension("cogs.github")
-    await bot.load_extension("cogs.admin")
-    await bot.load_extension("cogs.help")
-    print("✅ All Cogs Loaded")
+    exts = ["cogs.meeting", "cogs.project", "cogs.github", "cogs.admin", "cogs.help"]
+    for e in exts: 
+        try: await bot.load_extension(e)
+        except Exception as err: print(f"Failed to load {e}: {err}")
+    
+    # Sync Slash Commands
+    try:
+        synced = await bot.tree.sync()
+        print(f"✅ Synced {len(synced)} slash commands")
+    except Exception as e:
+        print(f"⚠️ Sync failed: {e}")
 
     # Owner Auto-Register
     if OWNER_ID:

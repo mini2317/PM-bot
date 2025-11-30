@@ -32,9 +32,6 @@ class AIHelper:
             return f"제목: 에러 발생\n\n{e}"
 
     async def extract_tasks_and_updates(self, transcript, project_structure_text, active_tasks):
-        """
-        [UPDATE] 소극적인 태스크 추출 방지 및 문맥 파악 강화
-        """
         if not self.model: return {"new_tasks": [], "updates": []}
 
         tasks_str = json.dumps(active_tasks, ensure_ascii=False)
