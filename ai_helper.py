@@ -86,6 +86,6 @@ class AIHelper:
 
     async def review_code(self, repo, author, msg, diff):
         if not self.model: return "❌ Key Missing"
-        prompt = f"GitHub Review.\nRepo:{repo}, User:{author}, Msg:{msg}\nDiff:{diff[:20000]}\nKorean response."
+        prompt = f"GitHub 코드리뷰.\nRepo:{repo}, User:{author}, Msg:{msg}\nDiff:{diff[:20000]}\n한국어로 대답할 것."
         try: return (await asyncio.to_thread(self.model.generate_content, prompt)).text
         except: return "Error"
