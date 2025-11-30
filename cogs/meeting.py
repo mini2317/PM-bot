@@ -6,6 +6,73 @@ import datetime
 from ui import EmbedPaginator, TaskSelectionView, StatusUpdateView, NewProjectView, RoleCreationView, RoleAssignmentView
 from utils import is_authorized, smart_chunk_text
 
+# [NEW] 할 일 등록 및 담당자 자동 배정 뷰
+class AutoAssignTaskView(discord.ui.View):
+    def __init__(self, tasks, mid, author, guild, db):
+        super().__init__(timeout=300)
+        self.tasks = tasks
+        self.mid = mid
+        self.author = author
+        self.guild = guild
+        self.db = db
+        self.selected_indices = []
+        
+        options = []
+        for i, t in enumerate(tasks):
+            # 글자수 제한 처리 및 라벨링
+            content = t['content'][:40]
+            project = t.get('project', '미정')[:15]
+            assignee = t.get('assignee_hint', '미정')[:10]
+            
+            label = f"[{project}] {content}"
+            description = f"담당 추천: {assignee}"
+            
+            options.append(discord.SelectOption(label=label, description=description, value=str(i)))
+        
+        if len(options) > 25: options = options[:25]
+        
+        self.select = discord.ui.Select(
+            placeholder="등록 및 배정할 업무 선택",
+            min_values=0,
+            max_values=len(options),
+            options=options
+        )
+        self.select.callback = self.select_callback
+        self.add_item(self.select)
+
+    async def select_callback(self, interaction):
+        self.selected_indices = [int(v) for v in self.select.values]
+        await interaction.response.defer()
+
+    @discord.ui.button(label="업무 등록 및 담당자 배정", style=discord.ButtonStyle.green, emoji="✅")
+    async def save(self, interaction, button):
+        if not self.selected_indices:
+            await interaction.followup.send("⚠️ 선택된 항목이 없습니다.", ephemeral=True)
+            return
+            
+        results = []
+        for idx in self.selected_indices:
+            t = self.tasks[idx]
+            # 1. 태스크 등록
+            tid = self.db.add_task(self.guild.id, t.get('project', '일반'), t['content'], self.mid)
+            res_str = f"✅ **#{tid}** 등록"
+            
+            # 2. 담당자 매칭 (이름 유사도 검색)
+            hint = t.get('assignee_hint')
+            if hint:
+                # 닉네임이나 이름에 힌트가 포함된 멤버 찾기
+                target = discord.utils.find(lambda m: hint in m.display_name or hint in m.name, self.guild.members)
+                if target:
+                    if self.db.assign_task(tid, target.id, target.display_name):
+                        res_str += f" → 👤 **{target.display_name}** 배정"
+                else:
+                    res_str += f" (담당 '{hint}' 미발견)"
+            
+            results.append(res_str)
+            
+        await interaction.message.edit(content="**[업무 처리 결과]**\n" + "\n".join(results), view=None)
+        self.stop()
+
 class MeetingCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -62,15 +129,17 @@ class MeetingCog(commands.Cog):
         e.add_field(name="요약", value=summary[:500]+"...", inline=False)
         await ctx.send(embed=e)
 
-        # 5-Step Flow
-        # TODO : flow 강화 - 담당자 찾기
-        async def step5():
+        # 6-Step Flow (Updated)
+        
+        # Step 5 & 6: 할 일 등록 및 담당자 배정
+        async def step5_final():
             if not res.get('new_tasks'): await ctx.send("💡 할일 없음"); return
-            await ctx.send("📝 **5. 할일 등록**", view=TaskSelectionView(res['new_tasks'], m_id, ctx.author, ctx.guild.id, self.bot.db))
+            # [변경] 새로 만든 AutoAssignTaskView 사용
+            await ctx.send("📝 **5. 할 일 등록 및 6. 담당자 배정**", view=AutoAssignTaskView(res['new_tasks'], m_id, ctx.author, ctx.guild, self.bot.db))
 
         async def step4():
-            if not res.get('assign_roles'): await step5(); return
-            await ctx.send(f"👤 **4. 역할 부여 제안**", view=RoleAssignmentView(res['assign_roles'], ctx.author, step5, ctx.guild))
+            if not res.get('assign_roles'): await step5_final(); return
+            await ctx.send(f"👤 **4. 역할 부여 제안**", view=RoleAssignmentView(res['assign_roles'], ctx.author, step5_final, ctx.guild))
 
         async def step3():
             if not res.get('create_roles'): await step4(); return
