@@ -13,90 +13,79 @@ class AIHelper:
 
     async def generate_meeting_summary(self, transcript):
         if not self.model: return "제목: 알 수 없음\n\nAPI 키가 없습니다."
+        prompt = f"당신은 PM입니다. 한국어로 회의록을 작성하세요. 첫 줄은 '제목: [제목]' 형식입니다.\n\n[대화]:\n{transcript}"
+        try: return (await asyncio.to_thread(self.model.generate_content, prompt)).text
+        except Exception as e: return f"에러: {e}"
 
-        prompt = f"""
-        당신은 유능한 프로젝트 매니저입니다. 아래 회의 내용을 바탕으로 핵심을 요약하세요.
-        
-        [지시사항]
-        1. **반드시 한국어로 작성하세요.**
-        2. 첫 줄은 "제목: [회의 내용을 관통하는 제목]" 형식으로 작성하세요.
-        3. 단순 나열보다는 논의의 흐름(문제제기 -> 논의 -> 결정 -> 향후계획)이 보이도록 요약하세요.
-
-        [대화 스크립트]:
-        {transcript}
+    async def extract_tasks_and_updates(self, transcript, project_structure_text, active_tasks, server_roles, members):
         """
-        try:
-            response = await asyncio.to_thread(self.model.generate_content, prompt)
-            return response.text
-        except Exception as e:
-            return f"제목: 에러 발생\n\n{e}"
-
-    async def extract_tasks_and_updates(self, transcript, project_structure_text, active_tasks):
-        if not self.model: return {"new_tasks": [], "updates": []}
+        [UPDATE] AI의 눈치를 대폭 상향시켰습니다.
+        소극적인 태도 금지, 적극적/추론적 할 일 생성, 역할 강제 추출.
+        """
+        if not self.model: return {}
 
         tasks_str = json.dumps(active_tasks, ensure_ascii=False)
 
         prompt = f"""
         회의 대화 내용을 분석하여 프로젝트 관리 정보를 JSON으로 추출하세요.
+
+        [🚨 최우선 지시사항 - 과할 정도로 적극적으로 추출하세요]
+        당신은 "눈치 빠른 비서"입니다. 확정된 사항뿐만 아니라, **지시, 압박, 제안, 막연한 아이디어**까지 모두 실행 가능한 항목으로 변환하세요.
         
-        [매우 중요 지시사항 - 할 일 추출 기준]
-        **"할 일 없음"이라고 쉽게 결론 내리지 마세요.**
-        대화 내용을 깊이 분석하여 아래와 같은 뉘앙스도 모두 **새로운 할 일(new_tasks)**로 잡으세요:
-        1. **미래형 발언**: "~해야겠다", "~할 예정이다", "~하기로 하자"
-        2. **제안 및 필요성**: "~가 필요해 보인다", "~는 고쳐야 한다", "다음엔 ~를 해보자"
-        3. **담당자가 불명확해도**: 누군가는 해야 할 일이라면 일단 추출하세요. (담당자 미정으로)
-        4. **아이디어 단계**: 구체적이지 않아도 "기획", "조사" 등의 태스크로 구체화하세요.
-
-        [컨텍스트 정보]
-        1. 현재 프로젝트 구조:
-        {project_structure_text}
-        (새 할 일이 기존 프로젝트의 하위인지, 아예 새로운 프로젝트가 필요한지 판단하세요.)
-
-        2. 진행 중인 작업:
-        {tasks_str}
-
-        [출력 데이터 구조]
-        1. **new_tasks**: 
-           - `content`: 할 일 내용 (동사형으로 끝맺음, 예: "UI 수정하기")
-           - `project`: 기존 프로젝트명 또는 새 프로젝트명
-           - `is_new_project`: 새 프로젝트면 true
-           - `suggested_parent`: 새 프로젝트일 경우 상위 프로젝트명 (없으면 null)
-           - `assignee_hint`: 문맥상 추정되는 담당자 이름 (없으면 빈 문자열)
+        1. **할 일(new_tasks) 추출 기준**:
+           - "게임을 만들자" -> "게임 기획안 작성", "초기 컨셉 회의" (구체적이지 않아도 실행 가능한 첫 단계로 변환)
+           - "역할 좀 정해라" -> "팀 내 R&R(역할) 정의", "담당자 배정 논의"
+           - "~가 필요하다", "~해야지" -> 즉시 할 일로 등록
+           - 누군가에게 압박/지시하는 말투 -> 해당 내용을 즉시 할 일로 변환
         
-        2. **updates**: 
-           - 대화 중 명시적으로 완료되었거나 상태가 바뀐 작업의 `task_id`와 `status`(TODO, IN_PROGRESS, DONE)
+        2. **역할(create_roles, assign_roles) 추출 기준**:
+           - "니가 팀장 해", "개발자 필요해" 등 언급이 있으면 즉시 추출
+           - 문맥상 특정인이 주도적으로 말하면 'PM'이나 '리더' 역할을 제안해볼 것
+
+        [컨텍스트]
+        1. 프로젝트 구조: {project_structure_text}
+        2. 진행 작업: {tasks_str}
+        3. 현재 서버 역할: {server_roles}
+        4. 관련 멤버: {members}
 
         [입력 대화]:
         {transcript}
 
-        [출력 JSON 예시]:
+        [출력 포맷 (JSON Only)]:
         {{
             "new_tasks": [
-                {{"content": "메인 페이지 배너 시안 제작", "project": "디자인", "assignee_hint": "김철수", "is_new_project": false, "suggested_parent": null}}
+                {{"content": "게임 기획 초안 작성", "project": "게임개발", "assignee_hint": "김철수", "is_new_project": true, "suggested_parent": null}}
             ],
-            "updates": []
+            "updates": [],
+            "create_roles": ["기획자", "개발자"],
+            "assign_roles": [{{"member_name": "김철수", "role_name": "기획자"}}]
         }}
         """
         try:
-            response = await asyncio.to_thread(self.model.generate_content, prompt)
+            config = genai.types.GenerationConfig(response_mime_type="application/json")
+            
+            response = await asyncio.to_thread(
+                self.model.generate_content, 
+                prompt, 
+                generation_config=config
+            )
+            
             text = response.text
-            text = re.sub(r'```json\s*', '', text)
+            text = re.sub(r'```json\s*', '', text, flags=re.IGNORECASE)
             text = re.sub(r'```\s*', '', text)
-            text = text.strip()
-            return json.loads(text)
+            
+            return json.loads(text.strip())
+            
+        except json.JSONDecodeError as je:
+            print(f"AI JSON Parsing Error: {je}")
+            # JSON 파싱 실패 시 빈 딕셔너리가 아닌, 에러를 알릴 수 있는 더미 데이터라도 반환 고려 가능
+            return {}
         except Exception as e:
-            print(f"AI Extraction Error: {e}")
-            return {"new_tasks": [], "updates": []}
+            print(f"AI Error: {e}")
+            return {}
 
     async def review_code(self, repo, author, msg, diff):
-        # (기존 동일)
-        if not self.model: return "❌ API Key Missing"
-        prompt = f"""
-        GitHub 코드 리뷰.
-        Repo:{repo}, User:{author}, Msg:{msg}
-        Diff:{diff[:20000]}
-        한국어로 1.목적 2.버그/위험 3.개선안 작성.
-        """
-        try:
-            return (await asyncio.to_thread(self.model.generate_content, prompt)).text
+        if not self.model: return "❌ Key Missing"
+        prompt = f"GitHub Review.\nRepo:{repo}, User:{author}, Msg:{msg}\nDiff:{diff[:20000]}\nKorean response."
+        try: return (await asyncio.to_thread(self.model.generate_content, prompt)).text
         except: return "Error"
