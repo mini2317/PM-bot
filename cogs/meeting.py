@@ -63,6 +63,7 @@ class MeetingCog(commands.Cog):
         await ctx.send(embed=e)
 
         # 5-Step Flow
+        # TODO : flow 강화 - 담당자 찾기
         async def step5():
             if not res.get('new_tasks'): await ctx.send("💡 할일 없음"); return
             await ctx.send("📝 **5. 할일 등록**", view=TaskSelectionView(res['new_tasks'], m_id, ctx.author, ctx.guild.id, self.bot.db))
