@@ -2,83 +2,96 @@ import google.generativeai as genai
 import json
 import re
 import asyncio
+import os
+from groq import Groq # pip install groq
 
 class AIHelper:
-    def __init__(self, api_key):
-        if api_key:
-            genai.configure(api_key=api_key)
-            self.model = genai.GenerativeModel('gemini-2.0-flash-exp')
+    def __init__(self, gemini_key, groq_key=None):
+        self.gemini_key = gemini_key
+        self.groq_key = groq_key
+        self.load_config()
+        self.setup_client()
+
+    def load_config(self):
+        try:
+            with open("src/config.json", "r", encoding="utf-8") as f:
+                self.config = json.load(f)
+        except:
+            # 기본값
+            self.config = {"ai_provider": "gemini", "ai_model": "gemini-2.0-flash-exp"}
+
+    def setup_client(self):
+        self.provider = self.config.get("ai_provider", "gemini")
+        
+        if self.provider == "gemini" and self.gemini_key:
+            genai.configure(api_key=self.gemini_key)
+            self.model = genai.GenerativeModel(self.config.get("ai_model", "gemini-2.0-flash-exp"))
+        elif self.provider == "groq" and self.groq_key:
+            self.client = Groq(api_key=self.groq_key)
+            self.groq_model = self.config.get("groq_model", "llama3-70b-8192")
         else:
+            print("⚠️ AI Provider 설정 오류 또는 키 누락")
             self.model = None
 
+    async def generate_content(self, prompt):
+        """Provider에 따른 통합 생성 함수"""
+        if self.provider == "gemini":
+            if not self.model: return "❌ Gemini 키 설정 필요"
+            response = await asyncio.to_thread(self.model.generate_content, prompt)
+            return response.text
+        
+        elif self.provider == "groq":
+            if not hasattr(self, 'client'): return "❌ Groq 키 설정 필요"
+            
+            def call_groq():
+                completion = self.client.chat.completions.create(
+                    messages=[{"role": "user", "content": prompt}],
+                    model=self.groq_model,
+                )
+                return completion.choices[0].message.content
+
+            return await asyncio.to_thread(call_groq)
+        
+        return "❌ AI Provider 설정 오류"
+
     async def generate_meeting_summary(self, transcript):
-        if not self.model: return "제목: 알 수 없음\n\nAPI 키가 없습니다."
         prompt = f"당신은 PM입니다. 한국어로 회의록을 작성하세요. 첫 줄은 '제목: [제목]' 형식입니다.\n\n[대화]:\n{transcript}"
-        try: return (await asyncio.to_thread(self.model.generate_content, prompt)).text
+        try: return await self.generate_content(prompt)
         except Exception as e: return f"에러: {e}"
 
     async def extract_tasks_and_updates(self, transcript, project_structure_text, active_tasks, server_roles, members):
-        """
-        [UPDATE] AI의 눈치를 대폭 상향시켰습니다.
-        소극적인 태도 금지, 적극적/추론적 할 일 생성, 역할 강제 추출.
-        """
-        if not self.model: return {}
-
         tasks_str = json.dumps(active_tasks, ensure_ascii=False)
-
         prompt = f"""
         회의 대화 내용을 분석하여 프로젝트 관리 정보를 JSON으로 추출하세요.
-
-        [🚨 최우선 지시사항]
-        1. **과할 정도로 적극적으로 추출하세요**: 확정된 사항뿐만 아니라 지시, 압박, 제안, 아이디어도 모두 실행 가능한 항목으로 변환하세요.
-        2. **프로젝트 이름 주의**: 컨텍스트에 제공된 프로젝트 이름들은 각각 별개의 프로젝트입니다. 'A, B'는 'A'와 'B' 두 개이지, 'A, B'라는 이름의 프로젝트가 아닙니다.
-        
-        [컨텍스트 정보]
-        1. 프로젝트 구조(트리): 
-        {project_structure_text}
-        (위 구조에 없는 새로운 주제라면 과감하게 새 프로젝트 이름을 제안하세요.)
-
+        [컨텍스트]
+        1. 프로젝트 구조: {project_structure_text}
         2. 진행 작업: {tasks_str}
         3. 서버 역할: {server_roles}
         4. 멤버: {members}
 
-        [입력 대화]:
-        {transcript}
-
-        [출력 포맷 (JSON Only)]:
+        [요청사항]
+        적극적으로 할 일과 변경사항을 추출하세요. 출력은 오직 **순수 JSON**이어야 합니다.
+        
+        [입력]: {transcript}
+        
+        [출력 예시]:
         {{
-            "new_tasks": [
-                {{"content": "할 일 내용", "project": "프로젝트명(기존or신규)", "assignee_hint": "추정 담당자", "is_new_project": true/false, "suggested_parent": "상위프로젝트명(없으면 null)"}}
-            ],
-            "updates": [],
-            "create_roles": ["필요한역할명"],
-            "assign_roles": [{{"member_name": "멤버", "role_name": "역할"}}]
+            "new_tasks": [{{"content": "...", "project": "...", "assignee_hint": "...", "is_new_project": false, "suggested_parent": null}}],
+            "updates": [{{"task_id": 12, "status": "DONE"}}],
+            "create_roles": [],
+            "assign_roles": []
         }}
         """
         try:
-            config = genai.types.GenerationConfig(response_mime_type="application/json")
-            
-            response = await asyncio.to_thread(
-                self.model.generate_content, 
-                prompt, 
-                generation_config=config
-            )
-            
-            text = response.text
+            text = await self.generate_content(prompt)
             text = re.sub(r'```json\s*', '', text, flags=re.IGNORECASE)
             text = re.sub(r'```\s*', '', text)
-            
             return json.loads(text.strip())
-            
-        except json.JSONDecodeError as je:
-            print(f"AI JSON Parsing Error: {je}")
-            return {}
         except Exception as e:
-            print(f"AI Error: {e}")
+            print(f"AI Extraction Error: {e}")
             return {}
 
     async def review_code(self, repo, author, msg, diff):
-        if not self.model: return "❌ Key Missing"
-        prompt = f"GitHub Review.\nRepo:{repo}, User:{author}, Msg:{msg}\nDiff:{diff[:20000]}\한국어로 답변해."
-        try: return (await asyncio.to_thread(self.model.generate_content, prompt)).text
+        prompt = f"GitHub Review.\nRepo:{repo}, User:{author}, Msg:{msg}\nDiff:{diff[:20000]}\nKorean response."
+        try: return await self.generate_content(prompt)
         except: return "Error"

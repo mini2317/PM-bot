@@ -110,3 +110,71 @@ class TaskSelectionView(View):
     async def cancel(self, interaction, button):
         await interaction.message.edit(content="❌ 취소", view=None)
         self.stop()
+
+# [NEW] 회의 종료 후 자동 배정 뷰 (사용자 코드)
+class AutoAssignTaskView(View):
+    def __init__(self, tasks, mid, author, guild, db):
+        super().__init__(timeout=300)
+        self.tasks = tasks
+        self.mid = mid
+        self.author = author
+        self.guild = guild
+        self.db = db
+        self.selected_indices = []
+        
+        options = []
+        for i, t in enumerate(tasks):
+            # 글자수 제한 처리 및 라벨링
+            # [Fix] JSON에서 값이 null로 올 경우를 대비해 or 연산자로 기본값 보장
+            content = (t.get('content') or '내용 없음')[:40]
+            project = (t.get('project') or '미정')[:15]
+            assignee = (t.get('assignee_hint') or '미정')[:10]
+            
+            label = f"[{project}] {content}"
+            description = f"담당 추천: {assignee}"
+            
+            options.append(discord.SelectOption(label=label, description=description, value=str(i)))
+        
+        if len(options) > 25: options = options[:25]
+        
+        self.select = Select(
+            placeholder="등록 및 배정할 업무 선택",
+            min_values=0,
+            max_values=len(options),
+            options=options
+        )
+        self.select.callback = self.select_callback
+        self.add_item(self.select)
+
+    async def select_callback(self, interaction):
+        self.selected_indices = [int(v) for v in self.select.values]
+        await interaction.response.defer()
+
+    @discord.ui.button(label="업무 등록 및 담당자 배정", style=discord.ButtonStyle.green, emoji="✅")
+    async def save(self, interaction, button):
+        if not self.selected_indices:
+            await interaction.followup.send("⚠️ 선택된 항목이 없습니다.", ephemeral=True)
+            return
+            
+        results = []
+        for idx in self.selected_indices:
+            t = self.tasks[idx]
+            # 1. 태스크 등록
+            tid = self.db.add_task(self.guild.id, t.get('project', '일반'), t['content'], self.mid)
+            res_str = f"✅ **#{tid}** 등록"
+            
+            # 2. 담당자 매칭 (이름 유사도 검색)
+            hint = t.get('assignee_hint')
+            if hint:
+                # 닉네임이나 이름에 힌트가 포함된 멤버 찾기
+                target = discord.utils.find(lambda m: hint in m.display_name or hint in m.name, self.guild.members)
+                if target:
+                    if self.db.assign_task(tid, target.id, target.display_name):
+                        res_str += f" → 👤 **{target.display_name}** 배정"
+                else:
+                    res_str += f" (담당 '{hint}' 미발견)"
+            
+            results.append(res_str)
+            
+        await interaction.message.edit(content="**[업무 처리 결과]**\n" + "\n".join(results), view=None)
+        self.stop()
