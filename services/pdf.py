@@ -65,7 +65,7 @@ def parse_markdown_to_flowables(text, styles, font_name):
 
     # 3. 텍스트를 코드 블록(```) 기준으로 분리
     # 정규식 설명: ```(언어명 생략가능)\n(내용)
-    parts = re.split(r'\w+)?\n(.*?)```', text, flags=re.DOTALL)
+    parts = re.split(r'```(?:\w+)?\n(.*?)```', text, flags=re.DOTALL)
     for i, part in enumerate(parts):
         # 짝수 인덱스: 일반 텍스트, 홀수 인덱스: 코드 블록
         if i % 2 == 1:
