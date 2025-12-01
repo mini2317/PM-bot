@@ -2,14 +2,13 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 import datetime
-import json
+# [변경] ui 패키지에서 필요한 View 가져오기 (AutoAssignTaskView 포함)
 from ui import EmbedPaginator, TaskSelectionView, StatusUpdateView, NewProjectView, RoleCreationView, RoleAssignmentView, AutoAssignTaskView
 from utils import is_authorized, smart_chunk_text
 
 class MeetingCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        # meeting_buffer key: channel_id -> thread_id 로 변경
         self.meeting_buffer = {} 
 
     @commands.Cog.listener()
@@ -23,13 +22,11 @@ class MeetingCog(commands.Cog):
     async def meeting_group(self, ctx):
         if ctx.invoked_subcommand is None: await ctx.send_help(ctx.command)
 
-    @meeting_group.command(name="시작", description="회의 스레드를 생성하고 기록을 시작합니다.")
+    @meeting_group.command(name="시작", description="회의 기록 시작")
     @app_commands.describe(name="주제")
     @is_authorized()
     async def start_meeting(self, ctx, *, name: str = None):
-        if ctx.channel.id in self.meeting_buffer: 
-            await ctx.send("🔴 이미 진행 중입니다.")
-            return
+        if ctx.channel.id in self.meeting_buffer: await ctx.send("🔴 진행 중"); return
         if not name: name = f"{datetime.datetime.now().strftime('%Y-%m-%d')} 회의"
         
         try:
@@ -43,8 +40,9 @@ class MeetingCog(commands.Cog):
     @meeting_group.command(name="종료", description="회의 종료 및 분석")
     @is_authorized()
     async def stop_meeting(self, ctx):
+        # 스레드 체크
         if ctx.channel.id not in self.meeting_buffer:
-            await ctx.send("⚠️ 기록 중인 스레드가 아닙니다.")
+            await ctx.send("⚠️ 기록 중인 회의 스레드가 아닙니다.")
             return
 
         data = self.meeting_buffer.pop(ctx.channel.id)
@@ -52,14 +50,16 @@ class MeetingCog(commands.Cog):
         if not raw: await ctx.send("📝 내용 없음"); return
 
         txt = "".join([f"[Speaker: {m['user']}] {m['content']}\n" for m in raw])
-        waiting = await ctx.send("🤖 AI 분석 중...")
+        waiting = await ctx.send("🤖 AI 분석 중... (상호작용 후 스레드가 닫힙니다)")
 
+        # 1. 요약 & 저장
         full_result = await self.bot.ai.generate_meeting_summary(txt)
         lines = full_result.strip().split('\n')
         title = lines[0].replace("제목:", "").strip() if lines[0].startswith("제목:") else data['name']
         summary = "\n".join(lines[1:]).strip() if lines[0].startswith("제목:") else full_result
         m_id = self.bot.db.save_meeting(ctx.guild.id, title, ctx.channel.id, summary, data['jump_url'])
 
+        # 2. 분석 데이터 추출
         projs = [r[1] for r in self.bot.db.get_project_tree(ctx.guild.id)]
         active = self.bot.db.get_active_tasks_simple(ctx.guild.id)
         roles = ", ".join([r.name for r in ctx.guild.roles if not r.is_default()])
@@ -73,38 +73,53 @@ class MeetingCog(commands.Cog):
         e.add_field(name="요약", value=summary[:500]+"...", inline=False)
         await ctx.send(embed=e)
 
-        # [NEW] 스레드 아카이브 (닫기)
-        try:
-            if isinstance(ctx.channel, discord.Thread):
-                await ctx.channel.edit(archived=True, locked=False)
-        except Exception as e:
-            print(f"스레드 닫기 실패: {e}")
+        # [NEW] 스레드 닫기 콜백 함수 정의
+        async def close_thread():
+            try:
+                await ctx.send("🔒 모든 처리가 완료되어 스레드를 닫습니다.")
+                if isinstance(ctx.channel, discord.Thread):
+                    await ctx.channel.edit(archived=True, locked=False)
+            except Exception as e:
+                print(f"스레드 닫기 실패: {e}")
 
-        # Flow 실행 (동일)
-        async def step5():
-            if not res.get('new_tasks'): await ctx.send("💡 할일 없음"); return
-            await ctx.send("📝 **5. 할일 등록**", view=AutoAssignTaskView(res['new_tasks'], m_id, ctx.author, ctx.guild, self.bot.db))
-        
+        # 5-Step Flow (콜백 전달)
+        async def step5_final():
+            new_tasks = res.get('new_tasks', [])
+            if not new_tasks:
+                await ctx.send("💡 등록할 할일이 없습니다.")
+                await close_thread() # 할 일 없으면 바로 닫기
+                return
+            
+            # [변경] AutoAssignTaskView에 close_thread 콜백 전달
+            view = AutoAssignTaskView(new_tasks, m_id, ctx.author, ctx.guild, self.bot.db, cleanup_callback=close_thread)
+            await ctx.send("📝 **5. 할 일 등록 및 담당자 배정**", view=view)
+
         async def step4():
-            if not res.get('assign_roles'): await step5(); return
-            await ctx.send(f"👤 **4. 역할 부여**", view=RoleAssignmentView(res['assign_roles'], ctx.author, step5, ctx.guild))
+            assigns = res.get('assign_roles', [])
+            if not assigns: await step5_final(); return
+            await ctx.send(f"👤 **4. 역할 부여 제안 ({len(assigns)}건)**", view=RoleAssignmentView(assigns, ctx.author, step5_final, ctx.guild))
 
         async def step3():
-            if not res.get('create_roles'): await step4(); return
-            await ctx.send(f"🛡️ **3. 역할 생성**", view=RoleCreationView(res['create_roles'], ctx.author, step4, ctx.guild))
+            creates = res.get('create_roles', [])
+            if not creates: await step4(); return
+            await ctx.send(f"🛡️ **3. 새 역할 생성 제안: {', '.join(creates)}**", view=RoleCreationView(creates, ctx.author, step4, ctx.guild))
 
         async def step2():
-            new_p = {t['project']: t.get('suggested_parent') for t in res.get('new_tasks',[]) if t.get('is_new_project')}
+            new_tasks = res.get('new_tasks', [])
+            new_p = {}
+            for t in new_tasks:
+                if t.get('is_new_project'): new_p[t['project']] = t.get('suggested_parent')
+            
             if new_p:
-                desc = "\n".join([f"• {k} (상위:{v})" for k,v in new_p.items()])
-                await ctx.send(f"🆕 **2. 프로젝트 생성**\n{desc}", view=NewProjectView(new_p, res['new_tasks'], ctx.author, step3, ctx.guild.id, self.bot.db))
+                desc = "\n".join([f"• **{k}** (상위: {v or '없음'})" for k, v in new_p.items()])
+                await ctx.send(f"🆕 **2. 프로젝트 생성 제안**\n{desc}", view=NewProjectView(new_p, new_tasks, ctx.author, step3, ctx.guild.id, self.bot.db))
             else: await step3()
 
         if res.get('updates'):
-            await ctx.send("🔄 **1. 상태 변경**", view=StatusUpdateView(res['updates'], ctx.author, step2, self.bot.db))
+            await ctx.send("🔄 **1. 상태 변경 감지**", view=StatusUpdateView(res['updates'], ctx.author, step2, self.bot.db))
         else: await step2()
 
-    # 목록, 조회, 삭제 (기존 유지)
+    # (목록, 조회, 삭제 명령어는 그대로 유지)
     @meeting_group.command(name="목록")
     @is_authorized()
     async def list(self, ctx):
@@ -115,7 +130,6 @@ class MeetingCog(commands.Cog):
         await ctx.send(embed=e)
 
     @meeting_group.command(name="조회")
-    @app_commands.describe(id="ID")
     @is_authorized()
     async def view(self, ctx, id: int):
         r = self.bot.db.get_meeting_detail(id, ctx.guild.id)

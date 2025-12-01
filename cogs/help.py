@@ -15,7 +15,7 @@ class HelpCog(commands.Cog):
             self.cmd_info = {}
 
     @commands.hybrid_command(name="도움말", description="봇 사용법과 명령어 설명을 확인합니다.")
-    @app_commands.describe(command="상세 내용을 볼 명령어 (예: 회의 시작, 레포등록)")
+    @app_commands.describe(command="상세 내용을 볼 명령어 (예: 회의시작, 레포등록)")
     async def help_cmd(self, ctx, *, command: str = None):
         """
         봇의 도움말을 보여줍니다. 
@@ -23,15 +23,16 @@ class HelpCog(commands.Cog):
         """
         # 1. 상세 도움말 요청
         if command:
-            # 띄어쓰기 등 입력 정규화 (필요시)
-            info = self.cmd_info.get(command)
+            # 띄어쓰기 제거 후 검색 (예: "회의 시작" -> "회의시작")
+            normalized_cmd = command.replace(" ", "")
+            info = self.cmd_info.get(normalized_cmd)
             
             # 정확히 일치하는 키가 없으면 검색 시도
             if not info:
                 for key in self.cmd_info:
-                    if command in key: # 부분 일치 검색
+                    if normalized_cmd in key: # 부분 일치 검색
                         info = self.cmd_info[key]
-                        command = key # 발견된 키로 교체
+                        normalized_cmd = key # 발견된 키로 교체
                         break
             
             if info:
@@ -45,40 +46,31 @@ class HelpCog(commands.Cog):
         
         # 2. 전체 도움말 목록 (카테고리별)
         else:
-            # 카테고리별로 명령어 분류
-            categories = {}
-            for cmd_name, data in self.cmd_info.items():
-                cat = data.get('cat', '기타')
-                if cat not in categories:
-                    categories[cat] = []
-                categories[cat].append((cmd_name, data.get('desc', '').split('\n')[0]))
+            # 카테고리별 임베드 생성 함수
+            def create_category_embed(title, commands_list, color):
+                embed = discord.Embed(title=title, color=color)
+                for cmd_name in commands_list:
+                    # JSON에서 설명 가져오기, 없으면 기본값
+                    info = self.cmd_info.get(cmd_name, {})
+                    desc = info.get('desc', '설명 없음').split('\n')[0] # 첫 줄만 사용
+                    # 표시할 때는 슬래시 커맨드 스타일로 (스페이스바 등은 info['usage'] 참고하거나 단순화)
+                    embed.add_field(name=f"!{cmd_name}", value=desc, inline=False)
+                return embed
 
-            embeds = []
-            # 카테고리 순서 정의 (원하는 순서대로)
-            ordered_cats = ["📋 프로젝트", "🎙️ 회의", "🐙 깃헙", "👑 관리"]
+            e1 = create_category_embed("📋 프로젝트 관리", ["프로젝트생성", "상위설정", "프로젝트구조", "할일등록", "현황판", "완료", "담당"], 0x3498db)
+            e1.set_footer(text="Page 1/4")
             
-            # 정의된 순서대로 Embed 생성
-            for cat_name in ordered_cats:
-                if cat_name in categories:
-                    e = discord.Embed(title=f"{cat_name} 명령어", color=0x3498db)
-                    for cmd_name, short_desc in categories[cat_name]:
-                        e.add_field(name=f"/{cmd_name}", value=short_desc, inline=False)
-                    e.set_footer(text="!도움말 [명령어] 로 상세 설명 확인 | 페이지를 넘겨보세요")
-                    embeds.append(e)
+            e2 = create_category_embed("🎙️ 회의 시스템", ["회의시작", "회의종료", "회의목록", "회의조회", "회의삭제"], 0xe74c3c)
+            e2.set_footer(text="Page 2/4")
             
-            # 기타 카테고리 처리
-            for cat_name, items in categories.items():
-                if cat_name not in ordered_cats:
-                    e = discord.Embed(title=f"{cat_name} 명령어", color=0x95a5a6)
-                    for cmd_name, short_desc in items:
-                        e.add_field(name=f"/{cmd_name}", value=short_desc, inline=False)
-                    embeds.append(e)
-
-            if embeds:
-                view = EmbedPaginator(embeds, ctx.author)
-                await ctx.send(embed=embeds[0], view=view)
-            else:
-                await ctx.send("표시할 도움말이 없습니다.")
+            e3 = create_category_embed("🐙 깃헙 & 관리", ["레포등록", "레포삭제", "레포목록", "초기설정", "권한추가", "권한삭제"], 0x9b59b6)
+            e3.set_footer(text="Page 3/4")
+            
+            e4 = create_category_embed("🤖 AI 비서", ["비서설정"], 0x2ecc71)
+            e4.set_footer(text="Page 4/4 | !도움말 [명령어] 로 상세 정보 확인")
+            
+            view = EmbedPaginator([e1, e2, e3, e4], ctx.author)
+            await ctx.send(embed=e1, view=view)
 
 async def setup(bot):
     await bot.add_cog(HelpCog(bot))
