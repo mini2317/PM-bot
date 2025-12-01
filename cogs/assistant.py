@@ -75,7 +75,8 @@ class AssistantCog(commands.Cog):
 
     async def handle_assign_task(self, interaction, data):
         tid = data.get('task_id')
-        m_name = data.get('member_name')
+        # [Fix] AI가 키를 다르게 줄 경우 대비 (member_name, member, user_name 등)
+        m_name = data.get('member_name') or data.get('member') or data.get('user_name')
         
         if not tid or not m_name:
             await interaction.message.edit(content="❌ 작업 ID 또는 멤버 이름이 없습니다.", view=None)
@@ -135,7 +136,6 @@ class AssistantCog(commands.Cog):
 
     async def handle_stop_meeting(self, interaction, data):
         # 회의 종료는 복잡한 Flow(View 연쇄)가 있으므로, 가이드만 제공하는 것이 안전함
-        # 만약 강제로 종료하려면 MeetingCog의 stop_meeting 로직을 분리해서 호출해야 함
         meeting_cog = self.bot.get_cog('MeetingCog')
         
         # 현재 채널이 회의 중인지 확인

@@ -22,7 +22,8 @@ class AIHelper:
             with open("src/config.json", "r", encoding="utf-8") as f:
                 self.config = json.load(f)
         except:
-            self.config = {"ai_provider": "gemini", "ai_model": "gemini-2.0-flash-exp"}
+            # [Fix] 기본 모델을 최신 지원 모델로 변경
+            self.config = {"ai_provider": "gemini", "ai_model": "gemini-2.0-flash-exp", "groq_model": "llama-3.3-70b-versatile"}
 
     def load_prompts(self):
         try:
@@ -40,7 +41,8 @@ class AIHelper:
             logger.info(f"Gemini Client Setup Complete. Model: {self.config.get('ai_model')}")
         elif self.provider == "groq" and self.groq_key:
             self.client = Groq(api_key=self.groq_key)
-            self.groq_model = self.config.get("groq_model", "llama3-70b-8192")
+            # [Fix] config.json에 값이 없을 경우를 대비해 기본값도 최신 모델로 변경
+            self.groq_model = self.config.get("groq_model", "llama-3.3-70b-versatile")
             logger.info(f"Groq Client Setup Complete. Model: {self.groq_model}")
         else:
             logger.error("❌ AI Provider 설정 오류 또는 키 누락")
@@ -132,7 +134,7 @@ class AIHelper:
         )
         logger.info(f"Reviewing code for {repo}...")
         try:
-            # [UPDATE] JSON 모드로 호출
+            # JSON 모드로 호출
             res = await self.generate_content(prompt, is_json=True)
             
             res_clean = re.sub(r'```json\s*', '', res, flags=re.I)
@@ -142,21 +144,30 @@ class AIHelper:
             
         except Exception as e:
             logger.error(f"Review Failed: {e}")
-            # 실패 시 텍스트 에러 메시지라도 담아서 반환
             return {"summary": "리뷰 생성 실패", "issues": [], "suggestions": [], "score": 0}
 
-    async def analyze_assistant_input(self, user_msg, active_tasks, projects):
+    async def analyze_assistant_input(self, chat_context, active_tasks, projects):
+        """
+        [UPDATE] 단일 메시지 대신 대화 맥락(Context)을 분석하여 의도를 파악합니다.
+        chat_context: 최근 대화 내용 리스트 또는 문자열
+        """
         tasks_str = json.dumps(active_tasks, ensure_ascii=False)
         projs_str = ", ".join(projects) if projects else "없음"
+        
+        # 리스트로 들어온 경우 줄바꿈으로 연결
+        if isinstance(chat_context, list):
+            context_msg = "\n".join(chat_context)
+        else:
+            context_msg = str(chat_context)
         
         template = self.prompts.get('assistant_analysis', "")
         prompt = template.format(
             projs_str=projs_str,
             tasks_str=tasks_str,
-            user_msg=user_msg
+            user_msg=context_msg # [Change] user_msg 변수에 전체 대화 맥락 주입
         )
 
-        logger.info(f"Analyzing Assistant Input: '{user_msg}'")
+        logger.info(f"Analyzing Assistant Input (Context Length: {len(context_msg)})")
         try:
             res = await self.generate_content(prompt, is_json=True)
             
