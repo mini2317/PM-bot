@@ -18,6 +18,7 @@ DISCORD_TOKEN = load_key("bot_token")
 GEMINI_API_KEY = load_key("gemini_key")
 GITHUB_TOKEN = load_key("github_key")
 OWNER_ID = load_key("owner_id")
+GROQ_API_KEY = load_key("groq_key") # [NEW] Groq 키 로드
 
 WEBHOOK_PORT = 8080
 WEBHOOK_PATH = "/github-webhook"
@@ -29,7 +30,8 @@ intents.members = True
 
 bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 bot.db = DBManager()
-bot.ai = AIHelper(GEMINI_API_KEY)
+# [UPDATE] AIHelper에 두 키를 모두 전달 (내부 설정에 따라 선택 사용)
+bot.ai = AIHelper(GEMINI_API_KEY, GROQ_API_KEY)
 bot.github_headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
 
 # 웹훅 서버 인스턴스 생성
@@ -62,12 +64,6 @@ async def on_ready():
     
     # Start Webhook Server
     await webhook_server.start()
-
-# [Global Message Handler]
-# 회의록 기록을 위해 필요 (Cog 이전에 실행됨)
-# 회의 버퍼는 MeetingCog에서 관리하므로, 여기서는 단순 전달만 하거나 제거해도 되지만,
-# meeting_buffer가 MeetingCog 내부에 있으므로 main에서는 제거해도 무방합니다.
-# MeetingCog의 리스너가 처리합니다.
 
 if __name__ == "__main__":
     if DISCORD_TOKEN: bot.run(DISCORD_TOKEN)

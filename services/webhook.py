@@ -1,13 +1,12 @@
 import aiohttp
 from aiohttp import web
+import discord
 import re
 import io
 import asyncio
-# [변경] 인자 추가된 함수 임포트
 from services.pdf import generate_review_pdf
 from utils import smart_chunk_text
 from ui import EmbedPaginator
-import discord
 
 class WebhookServer:
     def __init__(self, bot, port=8080, path="/github-webhook"):
@@ -54,55 +53,73 @@ class WebhookServer:
         for c in data.get('commits', []):
             author = c['author']['name']
             message = c['message']
-            web_url = c['url'] # [중요] 링크 URL
+            web_url = c['url']
             cid_short = c['id'][:7]
-            
-            msg = f"🚀 `{rn}` Commit: [`{cid_short}`]({web_url})\n{message}"
             
             # Task 자동 완료
             matches = re.findall(r'(?:fix|close|resolve)\s*#(\d+)', message, re.IGNORECASE)
             closed = []
             for t in matches:
                 if self.bot.db.update_task_status(int(t), "DONE"): closed.append(t)
-            if closed: msg += f"\n✅ Closed: {', '.join(closed)}"
+            
+            msg_head = f"🚀 **Push** `{rn}`\nCommit: [`{cid_short}`]({web_url})\nMsg: `{message}`"
+            if closed: msg_head += f"\n✅ Closed: {', '.join(closed)}"
             
             diff = await self.get_github_diff(f"https://api.github.com/repos/{rn}/commits/{c['id']}")
             pdf_bytes = None
             review_embeds = []
-
+            
             if diff and len(diff.strip()) > 0:
-                review = await self.bot.ai.review_code(rn, author, message, diff)
+                # [UPDATE] JSON 데이터 수신
+                review_json = await self.bot.ai.review_code(rn, author, message, diff)
                 
-                # [변경] PDF 생성 시 링크 전달
+                # 1. PDF 생성 (JSON 전달)
                 pdf_title = f"Code Review: {rn} ({cid_short})"
-                pdf_content = f"Author: {author}\nMessage: {message}\n\n{review}"
-                
-                pdf_buffer = await asyncio.to_thread(generate_review_pdf, pdf_title, pdf_content, web_url)
+                pdf_buffer = await asyncio.to_thread(generate_review_pdf, pdf_title, review_json, web_url)
                 pdf_bytes = pdf_buffer.getvalue()
                 
-                # Embed 청킹
-                chunks = smart_chunk_text(review)
-                for i, ch in enumerate(chunks):
-                    e = discord.Embed(title="🤖 Review", description=ch, color=0x2ecc71)
-                    e.set_footer(text=f"{i+1}/{len(chunks)}")
-                    review_embeds.append(e)
-            
+                # 2. Embed 생성 (JSON 데이터를 마크다운으로 예쁘게 변환)
+                summary = review_json.get('summary', '요약 없음')
+                score = review_json.get('score', 0)
+                issues = review_json.get('issues', [])
+                suggestions = review_json.get('suggestions', [])
+
+                # 메인 Embed (요약 및 점수)
+                color = discord.Color.green() if score >= 80 else discord.Color.orange() if score >= 50 else discord.Color.red()
+                main_embed = discord.Embed(title=f"🤖 AI Code Review (Score: {score})", url=web_url, color=color, description=summary)
+                
+                # 이슈 목록 (상위 3개만 표시, 나머지는 PDF 유도)
+                if issues:
+                    issue_text = ""
+                    for issue in issues[:3]:
+                        icon = "🔴" if issue.get('severity') == '상' else "🟡" if issue.get('severity') == '중' else "🟢"
+                        issue_text += f"{icon} **[{issue.get('type')}]** {issue.get('description')}\n"
+                    
+                    if len(issues) > 3:
+                        issue_text += f"...외 {len(issues)-3}건 (PDF 참조)"
+                    main_embed.add_field(name="🚨 주요 이슈", value=issue_text, inline=False)
+                
+                # 제안 사항 (상위 2개만)
+                if suggestions:
+                    sug_text = "\n".join([f"💡 {s}" for s in suggestions[:2]])
+                    if len(suggestions) > 2: sug_text += "\n..."
+                    main_embed.add_field(name="✨ 개선 제안", value=sug_text, inline=False)
+                
+                main_embed.set_footer(text="상세 리포트는 첨부된 PDF 파일을 확인하세요.")
+                review_embeds.append(main_embed)
+
+            # 전송
             for cid in cids:
                 ch = self.bot.get_channel(cid)
                 if ch:
                     try:
-                        await ch.send(msg)
                         if review_embeds:
-                            # 파일 객체는 전송 시마다 새로 생성 (스트림 닫힘 방지)
                             f_send = discord.File(io.BytesIO(pdf_bytes), filename=f"Review_{cid_short}.pdf")
-                            
-                            if len(review_embeds) > 1:
-                                view = EmbedPaginator(review_embeds, author=None)
-                                await ch.send(embed=review_embeds[0], view=view, file=f_send)
-                            else:
-                                await ch.send(embed=review_embeds[0], file=f_send)
-                        elif diff is None:
-                            await ch.send(embed=discord.Embed(title="⚠️ 분석 생략", description="변경량이 너무 많습니다.", color=0xe74c3c))
+                            await ch.send(content=msg_head, embed=review_embeds[0], file=f_send)
+                        else:
+                            await ch.send(content=msg_head)
+                            if diff is None:
+                                await ch.send(embed=discord.Embed(title="⚠️ 분석 생략", description="변경량이 너무 많아 분석하지 못했습니다.", color=discord.Color.greyple()))
                     except Exception as e:
                         print(f"Err send {cid}: {e}")
 

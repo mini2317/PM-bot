@@ -6,7 +6,6 @@ import os
 import logging
 from groq import Groq
 
-# 로깅 설정
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("AIHelper")
 
@@ -55,7 +54,6 @@ class AIHelper:
             if self.provider == "gemini":
                 if not self.model: return "❌ 키 설정 필요"
                 
-                # Gemini JSON 모드 설정
                 config = genai.types.GenerationConfig(
                     response_mime_type="application/json"
                 ) if is_json else None
@@ -74,7 +72,6 @@ class AIHelper:
                     "messages": [{"role": "user", "content": prompt}],
                     "model": self.groq_model
                 }
-                # Groq JSON 모드 설정
                 if is_json:
                     kwargs["response_format"] = {"type": "json_object"}
 
@@ -94,7 +91,7 @@ class AIHelper:
         prompt = template.format(transcript=transcript)
         
         logger.info("Generating Meeting Summary...")
-        result = await self.generate_content(prompt, is_json=False) # 요약은 텍스트로
+        result = await self.generate_content(prompt, is_json=False)
         return result
 
     async def extract_tasks_and_updates(self, transcript, project_structure_text, active_tasks, server_roles, members):
@@ -113,7 +110,6 @@ class AIHelper:
         try:
             res = await self.generate_content(prompt, is_json=True)
             
-            # 마크다운 제거 및 파싱
             res_clean = re.sub(r'```json\s*', '', res, flags=re.I)
             res_clean = re.sub(r'```\s*', '', res_clean)
             parsed = json.loads(res_clean.strip())
@@ -123,7 +119,7 @@ class AIHelper:
             
         except Exception as e:
             logger.error(f"Task Extraction Failed: {e}")
-            logger.debug(f"Raw Response: {res}") # 실패 시 원본 출력
+            logger.debug(f"Raw Response: {res}")
             return {}
 
     async def review_code(self, repo, author, msg, diff):
@@ -135,11 +131,21 @@ class AIHelper:
             diff=diff[:20000]
         )
         logger.info(f"Reviewing code for {repo}...")
-        try: return await self.generate_content(prompt, is_json=False)
-        except: return "Error generating review."
+        try:
+            # [UPDATE] JSON 모드로 호출
+            res = await self.generate_content(prompt, is_json=True)
+            
+            res_clean = re.sub(r'```json\s*', '', res, flags=re.I)
+            res_clean = re.sub(r'```\s*', '', res_clean)
+            parsed = json.loads(res_clean.strip())
+            return parsed
+            
+        except Exception as e:
+            logger.error(f"Review Failed: {e}")
+            # 실패 시 텍스트 에러 메시지라도 담아서 반환
+            return {"summary": "리뷰 생성 실패", "issues": [], "suggestions": [], "score": 0}
 
     async def analyze_assistant_input(self, user_msg, active_tasks, projects):
-        """비서 기능: 사용자 입력 의도 파악"""
         tasks_str = json.dumps(active_tasks, ensure_ascii=False)
         projs_str = ", ".join(projects) if projects else "없음"
         
@@ -163,5 +169,4 @@ class AIHelper:
             
         except Exception as e:
             logger.error(f"Assistant Analysis Failed: {e}")
-            logger.debug(f"Raw Response: {res}")
             return {"action": "none", "comment": "죄송합니다, 이해하지 못했습니다."}

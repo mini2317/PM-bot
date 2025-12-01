@@ -2,6 +2,7 @@
 src/key/bot_token
 src/key/gemini_key
 src/key/github_key
+src/key/groq_key
 pm_bot.db
 .vscode
 __pycache__
