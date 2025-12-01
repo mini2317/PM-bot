@@ -2,7 +2,8 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 import datetime
-from ui import EmbedPaginator, TaskSelectionView, StatusUpdateView, NewProjectView, RoleCreationView, RoleAssignmentView
+import json
+from ui import EmbedPaginator, TaskSelectionView, StatusUpdateView, NewProjectView, RoleCreationView, RoleAssignmentView, AutoAssignTaskView
 from utils import is_authorized, smart_chunk_text
 
 # [NEW] 할 일 등록 및 담당자 자동 배정 뷰
@@ -116,12 +117,15 @@ class MeetingCog(commands.Cog):
         m_id = self.bot.db.save_meeting(ctx.guild.id, title, ctx.channel.id, summary, data['jump_url'])
 
         # 2. 데이터 추출
-        projs = [r[1] for r in self.bot.db.get_project_tree(ctx.guild.id)]
+        # [UPDATE] 프로젝트 목록을 JSON 리스트 문자열로 변환하여 명확하게 전달
+        projs_list = [r[1] for r in self.bot.db.get_project_tree(ctx.guild.id)]
+        projs_str = json.dumps(projs_list, ensure_ascii=False)
+        
         active_tasks = self.bot.db.get_active_tasks_simple(ctx.guild.id)
         roles = ", ".join([r.name for r in ctx.guild.roles if not r.is_default()])
         mems = ", ".join([m.display_name for m in ctx.guild.members if not m.bot])
 
-        res = await self.bot.ai.extract_tasks_and_updates(txt, ", ".join(projs), active_tasks, roles, mems)
+        res = await self.bot.ai.extract_tasks_and_updates(txt, projs_str, active_tasks, roles, mems)
         
         await waiting.delete()
         
@@ -130,30 +134,33 @@ class MeetingCog(commands.Cog):
         await ctx.send(embed=e)
 
         # 6-Step Flow
-        
-        # Step 5 & 6: 할 일 등록 및 담당자 배정
         async def step5_final():
             if not res.get('new_tasks'): await ctx.send("💡 할일 없음"); return
-            # [변경] 새로 만든 AutoAssignTaskView 사용
-            await ctx.send("📝 **할 일 등록 및 6. 담당자 배정**", view=AutoAssignTaskView(res['new_tasks'], m_id, ctx.author, ctx.guild, self.bot.db))
+            # [변경] AutoAssignTaskView 사용
+            await ctx.send("📝 **5. 할 일 등록 및 6. 담당자 배정**", view=AutoAssignTaskView(res['new_tasks'], m_id, ctx.author, ctx.guild, self.bot.db))
 
         async def step4():
             if not res.get('assign_roles'): await step5_final(); return
-            await ctx.send(f"👤 **역할 부여 제안**", view=RoleAssignmentView(res['assign_roles'], ctx.author, step5_final, ctx.guild))
+            await ctx.send(f"👤 **4. 역할 부여 제안**", view=RoleAssignmentView(res['assign_roles'], ctx.author, step5_final, ctx.guild))
 
         async def step3():
             if not res.get('create_roles'): await step4(); return
-            await ctx.send(f"🛡️ **새 역할 생성 제안**", view=RoleCreationView(res['create_roles'], ctx.author, step4, ctx.guild))
+            await ctx.send(f"🛡️ **3. 새 역할 생성 제안**", view=RoleCreationView(res['create_roles'], ctx.author, step4, ctx.guild))
 
         async def step2():
-            new_p = {t['project']: t.get('suggested_parent') for t in res.get('new_tasks',[]) if t.get('is_new_project')}
+            new_p = {}
+            for t in res.get('new_tasks', []):
+                if t.get('is_new_project'):
+                    # suggest_parent가 있으면 사용, 없으면 None
+                    new_p[t['project']] = t.get('suggested_parent')
+            
             if new_p:
-                desc = "\n".join([f"• {k} (상위:{v})" for k,v in new_p.items()])
-                await ctx.send(f"🆕 **프로젝트 생성 제안**\n{desc}", view=NewProjectView(new_p, res['new_tasks'], ctx.author, step3, ctx.guild.id, self.bot.db))
+                desc = "\n".join([f"• **{k}** (상위: {v or '없음'})" for k, v in new_p.items()])
+                await ctx.send(f"🆕 **2. 프로젝트 생성 제안**\n{desc}", view=NewProjectView(new_p, res['new_tasks'], ctx.author, step3, ctx.guild.id, self.bot.db))
             else: await step3()
 
         if res.get('updates'):
-            await ctx.send("🔄 **상태 변경**", view=StatusUpdateView(res['updates'], ctx.author, step2, self.bot.db))
+            await ctx.send("🔄 **1. 상태 변경 감지**", view=StatusUpdateView(res['updates'], ctx.author, step2, self.bot.db))
         else: await step2()
 
     @meeting_group.command(name="목록")

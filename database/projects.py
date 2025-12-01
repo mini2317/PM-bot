@@ -17,10 +17,30 @@ class ProjectMixin:
         res = c.fetchone(); conn.close(); return res[0] if res else None
 
     def set_parent_project(self, guild_id, child_name, parent_name):
+        """
+        [UPDATE] 순환 참조(Cycle) 방지 로직 추가
+        A가 B의 부모가 되려는데, 이미 B가 A의 조상이라면 설정을 막습니다.
+        """
         child_id = self.get_project_id(guild_id, child_name)
         parent_id = self.get_project_id(guild_id, parent_name)
-        if not child_id or not parent_id: return False
+        
+        if not child_id or not parent_id: return False # 존재하지 않는 프로젝트
+        if child_id == parent_id: return False # 자기 자신을 부모로 설정 불가
+
         conn = sqlite3.connect(self.db_name); c = conn.cursor()
+
+        # 순환 참조 검사: parent_id의 조상들을 따라가며 child_id가 나오는지 확인
+        current_check_id = parent_id
+        while current_check_id:
+            if current_check_id == child_id:
+                conn.close()
+                return False # 순환 감지됨 (실패)
+            
+            c.execute("SELECT parent_id FROM projects WHERE id=?", (current_check_id,))
+            res = c.fetchone()
+            current_check_id = res[0] if res else None
+
+        # 문제 없으면 업데이트
         c.execute("UPDATE projects SET parent_id=? WHERE id=?", (parent_id, child_id))
         conn.commit(); conn.close(); return True
 
