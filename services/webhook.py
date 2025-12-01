@@ -66,7 +66,7 @@ class WebhookServer:
                 if self.bot.db.update_task_status(int(t), "DONE"): closed.append(t)
             if closed: msg += f"\n✅ Closed: {', '.join(closed)}"
             
-            diff = await self.get_github_diff(f"[https://api.github.com/repos/](https://api.github.com/repos/){rn}/commits/{c['id']}")
+            diff = await self.get_github_diff(f"https://api.github.com/repos/{rn}/commits/{c['id']}")
             pdf_bytes = None
             review_embeds = []
 
