@@ -2,7 +2,6 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 import datetime
-# [변경] ui 패키지에서 가져옴
 from ui import EmbedPaginator, TaskSelectionView, StatusUpdateView, NewProjectView, RoleCreationView, RoleAssignmentView
 from utils import is_authorized, smart_chunk_text
 
@@ -20,9 +19,10 @@ class AutoAssignTaskView(discord.ui.View):
         options = []
         for i, t in enumerate(tasks):
             # 글자수 제한 처리 및 라벨링
-            content = t['content'][:40]
-            project = t.get('project', '미정')[:15]
-            assignee = t.get('assignee_hint', '미정')[:10]
+            # [Fix] JSON에서 값이 null로 올 경우를 대비해 or 연산자로 기본값 보장
+            content = (t.get('content') or '내용 없음')[:40]
+            project = (t.get('project') or '미정')[:15]
+            assignee = (t.get('assignee_hint') or '미정')[:10]
             
             label = f"[{project}] {content}"
             description = f"담당 추천: {assignee}"
@@ -129,31 +129,31 @@ class MeetingCog(commands.Cog):
         e.add_field(name="요약", value=summary[:500]+"...", inline=False)
         await ctx.send(embed=e)
 
-        # 6-Step Flow (Updated)
+        # 6-Step Flow
         
         # Step 5 & 6: 할 일 등록 및 담당자 배정
         async def step5_final():
             if not res.get('new_tasks'): await ctx.send("💡 할일 없음"); return
             # [변경] 새로 만든 AutoAssignTaskView 사용
-            await ctx.send("📝 **5. 할 일 등록 및 6. 담당자 배정**", view=AutoAssignTaskView(res['new_tasks'], m_id, ctx.author, ctx.guild, self.bot.db))
+            await ctx.send("📝 **할 일 등록 및 6. 담당자 배정**", view=AutoAssignTaskView(res['new_tasks'], m_id, ctx.author, ctx.guild, self.bot.db))
 
         async def step4():
             if not res.get('assign_roles'): await step5_final(); return
-            await ctx.send(f"👤 **4. 역할 부여 제안**", view=RoleAssignmentView(res['assign_roles'], ctx.author, step5_final, ctx.guild))
+            await ctx.send(f"👤 **역할 부여 제안**", view=RoleAssignmentView(res['assign_roles'], ctx.author, step5_final, ctx.guild))
 
         async def step3():
             if not res.get('create_roles'): await step4(); return
-            await ctx.send(f"🛡️ **3. 새 역할 생성 제안**", view=RoleCreationView(res['create_roles'], ctx.author, step4, ctx.guild))
+            await ctx.send(f"🛡️ **새 역할 생성 제안**", view=RoleCreationView(res['create_roles'], ctx.author, step4, ctx.guild))
 
         async def step2():
             new_p = {t['project']: t.get('suggested_parent') for t in res.get('new_tasks',[]) if t.get('is_new_project')}
             if new_p:
                 desc = "\n".join([f"• {k} (상위:{v})" for k,v in new_p.items()])
-                await ctx.send(f"🆕 **2. 프로젝트 생성 제안**\n{desc}", view=NewProjectView(new_p, res['new_tasks'], ctx.author, step3, ctx.guild.id, self.bot.db))
+                await ctx.send(f"🆕 **프로젝트 생성 제안**\n{desc}", view=NewProjectView(new_p, res['new_tasks'], ctx.author, step3, ctx.guild.id, self.bot.db))
             else: await step3()
 
         if res.get('updates'):
-            await ctx.send("🔄 **1. 상태 변경**", view=StatusUpdateView(res['updates'], ctx.author, step2, self.bot.db))
+            await ctx.send("🔄 **상태 변경**", view=StatusUpdateView(res['updates'], ctx.author, step2, self.bot.db))
         else: await step2()
 
     @meeting_group.command(name="목록")
