@@ -1,12 +1,13 @@
 import aiohttp
 from aiohttp import web
-import discord
 import re
 import io
 import asyncio
+# [변경] 인자 추가된 함수 임포트
 from services.pdf import generate_review_pdf
 from utils import smart_chunk_text
 from ui import EmbedPaginator
+import discord
 
 class WebhookServer:
     def __init__(self, bot, port=8080, path="/github-webhook"):
@@ -17,7 +18,6 @@ class WebhookServer:
         self.app.router.add_route('*', self.path, self.handler)
 
     async def start(self):
-        """웹 서버를 시작합니다."""
         runner = web.AppRunner(self.app)
         await runner.setup()
         site = web.TCPSite(runner, '0.0.0.0', self.port)
@@ -52,28 +52,32 @@ class WebhookServer:
         if not cids: return
         
         for c in data.get('commits', []):
-            msg = f"🚀 `{rn}` Commit: `{c['id'][:7]}`\n{c['message']}"
+            author = c['author']['name']
+            message = c['message']
+            web_url = c['url'] # [중요] 링크 URL
+            cid_short = c['id'][:7]
+            
+            msg = f"🚀 `{rn}` Commit: [`{cid_short}`]({web_url})\n{message}"
             
             # Task 자동 완료
-            matches = re.findall(r'(?:fix|close|resolve)\s*#(\d+)', c['message'], re.IGNORECASE)
+            matches = re.findall(r'(?:fix|close|resolve)\s*#(\d+)', message, re.IGNORECASE)
             closed = []
             for t in matches:
                 if self.bot.db.update_task_status(int(t), "DONE"): closed.append(t)
             if closed: msg += f"\n✅ Closed: {', '.join(closed)}"
             
-            # Diff 가져오기 및 리뷰 생성
-            diff = await self.get_github_diff(f"https://api.github.com/repos/{rn}/commits/{c['id']}")
+            diff = await self.get_github_diff(f"[https://api.github.com/repos/](https://api.github.com/repos/){rn}/commits/{c['id']}")
             pdf_bytes = None
             review_embeds = []
 
             if diff and len(diff.strip()) > 0:
-                review = await self.bot.ai.review_code(rn, c['author']['name'], c['message'], diff)
+                review = await self.bot.ai.review_code(rn, author, message, diff)
                 
-                # PDF 생성
-                pdf_title = f"Code Review: {rn} ({c['id'][:7]})"
-                pdf_content = f"Author: {c['author']['name']}\nMessage: {c['message']}\n\n[Review Content]\n{review}"
-                # 비동기 실행 (PDF 생성은 CPU 작업이므로)
-                pdf_buffer = await asyncio.to_thread(generate_review_pdf, pdf_title, pdf_content)
+                # [변경] PDF 생성 시 링크 전달
+                pdf_title = f"Code Review: {rn} ({cid_short})"
+                pdf_content = f"Author: {author}\nMessage: {message}\n\n{review}"
+                
+                pdf_buffer = await asyncio.to_thread(generate_review_pdf, pdf_title, pdf_content, web_url)
                 pdf_bytes = pdf_buffer.getvalue()
                 
                 # Embed 청킹
@@ -83,7 +87,6 @@ class WebhookServer:
                     e.set_footer(text=f"{i+1}/{len(chunks)}")
                     review_embeds.append(e)
             
-            # 각 채널에 전송
             for cid in cids:
                 ch = self.bot.get_channel(cid)
                 if ch:
@@ -91,7 +94,7 @@ class WebhookServer:
                         await ch.send(msg)
                         if review_embeds:
                             # 파일 객체는 전송 시마다 새로 생성 (스트림 닫힘 방지)
-                            f_send = discord.File(io.BytesIO(pdf_bytes), filename=f"Review_{c['id'][:7]}.pdf")
+                            f_send = discord.File(io.BytesIO(pdf_bytes), filename=f"Review_{cid_short}.pdf")
                             
                             if len(review_embeds) > 1:
                                 view = EmbedPaginator(review_embeds, author=None)
