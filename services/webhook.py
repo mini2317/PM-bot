@@ -1,3 +1,19 @@
+import sys
+import types
+
+# [Patch] Python 3.13+ compatibility: Mock audioop if missing
+# 'audioop' was removed in Python 3.13, which causes crashes in libraries like discord.py
+# that attempt to import it for voice support. This mock prevents the ImportError.
+if sys.version_info >= (3, 13):
+    try:
+        import audioop
+    except ImportError:
+        mock_audioop = types.ModuleType("audioop")
+        class error(Exception): pass
+        mock_audioop.error = error
+        # Inject into sys.modules so subsequent imports find it
+        sys.modules["audioop"] = mock_audioop
+
 import aiohttp
 from aiohttp import web
 import discord
