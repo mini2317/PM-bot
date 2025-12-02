@@ -1,6 +1,6 @@
 {
-  "ai_provider": "groq", 
+  "ai_provider": "gemini", 
   "ai_model": "gemini-2.0-flash-exp",
   "groq_model": "llama-3.3-70b-versatile",
-  "comment": "ai_provider는 'gemini' 또는 'groq' 중 선택 가능합니다."
+  "bot_repo": "mini2317/PM-bot" 
 }

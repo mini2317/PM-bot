@@ -146,14 +146,10 @@ class AIHelper:
             logger.error(f"Review Failed: {e}")
             return {"summary": "리뷰 생성 실패", "issues": [], "suggestions": [], "score": 0}
 
-    async def analyze_assistant_input(self, chat_context, active_tasks, projects):
+    async def analyze_assistant_input(self, chat_context, rich_context):
         """
-        [UPDATE] 단일 메시지 대신 대화 맥락(Context)을 분석하여 의도를 파악합니다.
-        chat_context: 최근 대화 내용 리스트 또는 문자열
+        [UPDATE] rich_context: 프로젝트 구조와 할 일이 통합된 텍스트
         """
-        tasks_str = json.dumps(active_tasks, ensure_ascii=False)
-        projs_str = ", ".join(projects) if projects else "없음"
-        
         # 리스트로 들어온 경우 줄바꿈으로 연결
         if isinstance(chat_context, list):
             context_msg = "\n".join(chat_context)
@@ -161,13 +157,28 @@ class AIHelper:
             context_msg = str(chat_context)
         
         template = self.prompts.get('assistant_analysis', "")
-        prompt = template.format(
-            projs_str=projs_str,
-            tasks_str=tasks_str,
-            user_msg=context_msg # [Change] user_msg 변수에 전체 대화 맥락 주입
-        )
+        
+        # 프롬프트 내 변수명도 변경 필요 (prompts.json 수정 필요)
+        # 여기서는 기존 포맷을 무시하고 새로운 context로 덮어씌우는 방식 예시
+        prompt = f"""
+        당신은 프로젝트 관리 비서입니다. 
+        
+        [현재 프로젝트 전체 현황 (Knowledge Graph)]
+        {rich_context}
 
-        logger.info(f"Analyzing Assistant Input (Context Length: {len(context_msg)})")
+        [사용자 대화 기록]
+        {context_msg}
+
+        위 정보를 바탕으로 사용자의 의도를 파악하여 JSON 액션을 생성하세요.
+        (지원 액션: create_project, add_task, complete_task, assign_task 등 기존과 동일)
+        
+        [출력]: 오직 JSON 형식.
+        """
+
+        # 실제로는 prompts.json을 수정해서 {rich_context}를 받게 하는 것이 가장 깔끔합니다.
+        # 아래는 호환성을 위해 기존 함수 호출 방식을 유지하되 내용을 rich_context로 대체하는 꼼수
+        # prompt = template.format(projs_str="[참조]", tasks_str=rich_context, user_msg=context_msg)
+        
         try:
             res = await self.generate_content(prompt, is_json=True)
             

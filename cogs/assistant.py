@@ -3,10 +3,12 @@ from discord.ext import commands
 import datetime
 from utils import is_authorized
 from ui import AssistantActionView
+from services.context_manager import ContextManager
 
 class AssistantCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self.ctx_manager = ContextManager(bot.db) # [NEW]
         # 액션 문자열과 핸들러 메서드 매핑 (Dispatcher)
         self.action_handlers = {
             'create_project': self.handle_create_project,
@@ -141,10 +143,18 @@ class AssistantCog(commands.Cog):
             chat_context.append(f"[{role}] {msg.content}")
 
         async with message.channel.typing():
-            active_tasks = self.bot.db.get_active_tasks_simple(message.guild.id)
-            projects = self.bot.db.get_all_projects()
+            # [NEW] 단순 리스트 대신 구조화된 Context 생성
+            rich_context = self.ctx_manager.build_guild_context(message.guild.id)
             
-            result = await self.bot.ai.analyze_assistant_input(chat_context, active_tasks, projects)
+            # 히스토리 가져오기
+            history = [msg async for msg in message.channel.history(limit=6)]
+            chat_context = []
+            for msg in reversed(history):
+                role = "Assistant" if msg.author.bot else "User"
+                chat_context.append(f"[{role}] {msg.content}")
+
+            # AI에게 전달
+            result = await self.bot.ai.analyze_assistant_input(chat_context, rich_context)
             
             action = result.get('action', 'none')
             comment = result.get('comment', '...')
