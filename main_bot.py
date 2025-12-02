@@ -1,3 +1,16 @@
+import sys
+import types
+
+# Python 3.13+ 호환성 패치
+if sys.version_info >= (3, 13):
+    try:
+        import audioop
+    except ImportError:
+        mock_audioop = types.ModuleType("audioop")
+        class error(Exception): pass
+        mock_audioop.error = error
+        sys.modules["audioop"] = mock_audioop
+
 import discord
 from discord.ext import commands
 import os
@@ -18,7 +31,7 @@ DISCORD_TOKEN = load_key("bot_token")
 GEMINI_API_KEY = load_key("gemini_key")
 GITHUB_TOKEN = load_key("github_key")
 OWNER_ID = load_key("owner_id")
-GROQ_API_KEY = load_key("groq_key") # [NEW] Groq 키 로드
+GROQ_API_KEY = load_key("groq_key")
 
 WEBHOOK_PORT = 8080
 WEBHOOK_PATH = "/github-webhook"
@@ -30,7 +43,6 @@ intents.members = True
 
 bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 bot.db = DBManager()
-# [UPDATE] AIHelper에 두 키를 모두 전달 (내부 설정에 따라 선택 사용)
 bot.ai = AIHelper(GEMINI_API_KEY, GROQ_API_KEY)
 bot.github_headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
 
