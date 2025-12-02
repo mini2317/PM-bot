@@ -73,7 +73,7 @@
   },
   "레포등록": {
     "cat": "🐙 깃헙",
-    "desc": "Github 레포지토리 알림을 연결합니다.\n\n📢 **Github Webhook 설정 방법**:\n1. 레포지토리 **Settings** > **Webhooks** > **Add webhook**\n2. **Payload URL**: `[봇서버주소]/github-webhook`\n3. **Content type**: `application/json` (필수!)\n4. **Events**: `Just the push event` 선택",
+    "desc": "Github 레포지토리 알림을 연결합니다.\n\n📢 **Github Webhook 설정 방법**:\n1. 레포지토리 **Settings** > **Webhooks** > **Add webhook**\n2. **Payload URL**: `http://34.133.165.49:8080/github-webhook`\n3. **Content type**: `application/json` (필수!)\n4. **Events**: `Just the push event` 선택",
     "usage": "/레포등록 [Owner/Repo]",
     "ex": "/레포등록 google/guava"
   },
