@@ -3,13 +3,11 @@ from discord.ext import commands
 import datetime
 from utils import is_authorized
 from ui import AssistantActionView
-from services.context_manager import ContextManager
 
 class AssistantCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.ctx_manager = ContextManager(bot.db) # [NEW]
-        # 액션 문자열과 핸들러 메서드 매핑 (Dispatcher)
+        # 액션 문자열과 핸들러 메서드 매핑
         self.action_handlers = {
             'create_project': self.handle_create_project,
             'set_parent': self.handle_set_parent,
@@ -21,7 +19,7 @@ class AssistantCog(commands.Cog):
             'stop_meeting': self.handle_stop_meeting,
             'add_repo': self.handle_add_repo,
             'remove_repo': self.handle_remove_repo,
-            'ask_user': self.handle_ask_user 
+            'ask_user': self.handle_ask_user
         }
 
     async def _refresh_dashboard(self, guild_id):
@@ -30,7 +28,6 @@ class AssistantCog(commands.Cog):
 
     # --- Action Handlers ---
     async def handle_ask_user(self, interaction, data):
-        """AI가 사용자에게 되묻는 경우"""
         question = data.get('question', '정보가 더 필요합니다.')
         await interaction.channel.send(f"🤖 {question}") 
         try: await interaction.message.delete()
@@ -143,24 +140,21 @@ class AssistantCog(commands.Cog):
             chat_context.append(f"[{role}] {msg.content}")
 
         async with message.channel.typing():
-            # [NEW] 단순 리스트 대신 구조화된 Context 생성
-            rich_context = self.ctx_manager.build_guild_context(message.guild.id)
-            
-            # 히스토리 가져오기
-            history = [msg async for msg in message.channel.history(limit=6)]
-            chat_context = []
-            for msg in reversed(history):
-                role = "Assistant" if msg.author.bot else "User"
-                chat_context.append(f"[{role}] {msg.content}")
+            # [Fix] AIHelper.analyze_assistant_input의 인자 순서에 맞게 데이터 전달
+            active_tasks = self.bot.db.get_active_tasks_simple(message.guild.id)
+            projects = self.bot.db.get_all_projects()
+            guild_id = message.guild.id
 
-            # AI에게 전달
-            result = await self.bot.ai.analyze_assistant_input(chat_context, rich_context)
+            result = await self.bot.ai.analyze_assistant_input(chat_context, active_tasks, projects, guild_id)
             
             action = result.get('action', 'none')
             comment = result.get('comment', '...')
             question = result.get('question')
 
             if action == 'none':
+                # 답변이 있는 경우에만 출력
+                if comment and comment != '...':
+                    await message.reply(f"🤖 {comment}")
                 return
 
             async def execute_callback(interaction, data):
@@ -174,7 +168,7 @@ class AssistantCog(commands.Cog):
             if action == 'ask_user':
                 await message.reply(f"🤖 {question}")
             else:
-                # [UPDATE] 상세 정보 포맷팅
+                # 상세 정보 포맷팅
                 details = ""
                 if action == 'add_task':
                     details = f"📌 **할 일 추가**: {result.get('content')}\n📁 **프로젝트**: {result.get('project', '일반')}"
@@ -189,7 +183,6 @@ class AssistantCog(commands.Cog):
                 elif action == 'add_repo':
                     details = f"🐙 **Github 연결**: {result.get('repo_name')}"
                 
-                # 상세 정보가 없으면 기본 코멘트만 사용
                 display_msg = f"🤖 **[비서 제안]**\n{comment}\n\n{details}" if details else f"🤖 **[비서 제안]**\n{comment}"
                 
                 view = AssistantActionView(result, message.author, execute_callback)

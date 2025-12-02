@@ -5,7 +5,9 @@ import asyncio
 import os
 import logging
 from groq import Groq
+from services.memory import MemoryService
 
+# 로깅 설정
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("AIHelper")
 
@@ -16,13 +18,13 @@ class AIHelper:
         self.load_config()
         self.load_prompts()
         self.setup_client()
+        self.memory = MemoryService() # 메모리 서비스(RAG)
 
     def load_config(self):
         try:
             with open("src/config.json", "r", encoding="utf-8") as f:
                 self.config = json.load(f)
         except:
-            # [Fix] 기본 모델을 최신 지원 모델로 변경
             self.config = {"ai_provider": "gemini", "ai_model": "gemini-2.0-flash-exp", "groq_model": "llama-3.3-70b-versatile"}
 
     def load_prompts(self):
@@ -41,7 +43,6 @@ class AIHelper:
             logger.info(f"Gemini Client Setup Complete. Model: {self.config.get('ai_model')}")
         elif self.provider == "groq" and self.groq_key:
             self.client = Groq(api_key=self.groq_key)
-            # [Fix] config.json에 값이 없을 경우를 대비해 기본값도 최신 모델로 변경
             self.groq_model = self.config.get("groq_model", "llama-3.3-70b-versatile")
             logger.info(f"Groq Client Setup Complete. Model: {self.groq_model}")
         else:
@@ -115,16 +116,12 @@ class AIHelper:
             res_clean = re.sub(r'```json\s*', '', res, flags=re.I)
             res_clean = re.sub(r'```\s*', '', res_clean)
             parsed = json.loads(res_clean.strip())
-
-            if isinstance(parsed, list):
-                parsed = parsed[0] if parsed else {}
             
             logger.debug(f"Extracted Data: {json.dumps(parsed, indent=2, ensure_ascii=False)}")
             return parsed
             
         except Exception as e:
             logger.error(f"Task Extraction Failed: {e}")
-            logger.debug(f"Raw Response: {res}")
             return {}
 
     async def review_code(self, repo, author, msg, diff):
@@ -137,57 +134,71 @@ class AIHelper:
         )
         logger.info(f"Reviewing code for {repo}...")
         try:
-            # JSON 모드로 호출
             res = await self.generate_content(prompt, is_json=True)
             
             res_clean = re.sub(r'```json\s*', '', res, flags=re.I)
             res_clean = re.sub(r'```\s*', '', res_clean)
             parsed = json.loads(res_clean.strip())
+            
+            # 리스트로 반환될 경우 첫 번째 요소 사용 (방어 코드)
+            if isinstance(parsed, list):
+                parsed = parsed[0] if parsed else {}
+                
             return parsed
             
         except Exception as e:
             logger.error(f"Review Failed: {e}")
             return {"summary": "리뷰 생성 실패", "issues": [], "suggestions": [], "score": 0}
 
-    async def analyze_assistant_input(self, chat_context, rich_context):
+    # [FIXED] guild_id 인자 추가
+    async def analyze_assistant_input(self, chat_context, active_tasks, projects, guild_id):
         """
-        [UPDATE] rich_context: 프로젝트 구조와 할 일이 통합된 텍스트
+        [RAG 적용] 대화 내용과 관련된 과거 기억을 함께 제공
         """
-        # 리스트로 들어온 경우 줄바꿈으로 연결
+        tasks_str = json.dumps(active_tasks, ensure_ascii=False)
+        projs_str = ", ".join(projects) if projects else "없음"
+        
+        # 1. 대화 내용(문자열) 추출
         if isinstance(chat_context, list):
+            query_text = chat_context[-1] # 가장 최근 메시지를 쿼리로 사용
             context_msg = "\n".join(chat_context)
         else:
+            query_text = chat_context
             context_msg = str(chat_context)
-        
+
+        # 2. [RAG] 관련 기억 검색
+        relevant_memories = self.memory.query_relevant(query_text, guild_id)
+        memory_context = "\n".join([f"- {m}" for m in relevant_memories]) if relevant_memories else "관련된 과거 기록 없음"
+
         template = self.prompts.get('assistant_analysis', "")
         
-        # 프롬프트 내 변수명도 변경 필요 (prompts.json 수정 필요)
-        # 여기서는 기존 포맷을 무시하고 새로운 context로 덮어씌우는 방식 예시
-        prompt = f"""
-        당신은 프로젝트 관리 비서입니다. 
-        
-        [현재 프로젝트 전체 현황 (Knowledge Graph)]
-        {rich_context}
-
-        [사용자 대화 기록]
+        # 프롬프트에 memory_context 주입 (prompts.json에 {past_memories} 자리가 없다면 user_msg에 붙임)
+        # 여기서는 user_msg 뒤에 붙여서 전송
+        augmented_msg = f"""
+        [대화 내용]:
         {context_msg}
 
-        위 정보를 바탕으로 사용자의 의도를 파악하여 JSON 액션을 생성하세요.
-        (지원 액션: create_project, add_task, complete_task, assign_task 등 기존과 동일)
-        
-        [출력]: 오직 JSON 형식.
+        [참고: 과거 관련 기억(RAG)]:
+        {memory_context}
         """
 
-        # 실제로는 prompts.json을 수정해서 {rich_context}를 받게 하는 것이 가장 깔끔합니다.
-        # 아래는 호환성을 위해 기존 함수 호출 방식을 유지하되 내용을 rich_context로 대체하는 꼼수
-        # prompt = template.format(projs_str="[참조]", tasks_str=rich_context, user_msg=context_msg)
-        
+        prompt = template.format(
+            projs_str=projs_str,
+            tasks_str=tasks_str,
+            user_msg=augmented_msg 
+        )
+
+        logger.info(f"Analyzing with Memory. Found {len(relevant_memories)} related items.")
         try:
             res = await self.generate_content(prompt, is_json=True)
             
             res_clean = re.sub(r'```json\s*', '', res, flags=re.I)
             res_clean = re.sub(r'```\s*', '', res_clean)
             parsed_res = json.loads(res_clean.strip())
+            
+            # 리스트 방어 코드
+            if isinstance(parsed_res, list):
+                parsed_res = parsed_res[0] if parsed_res else {}
             
             logger.info(f"Assistant Thought: {parsed_res.get('comment', 'No comment')} (Action: {parsed_res.get('action')})")
             return parsed_res
