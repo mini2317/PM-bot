@@ -180,6 +180,10 @@ class WebhookServer:
                 # AI 리뷰 요청 (JSON 응답)
                 review_json = await self.bot.ai.review_code(rn, author, message, diff_text)
                 
+                # [Safety Fix] AI가 List로 반환할 경우 Dict로 보정
+                if isinstance(review_json, list):
+                    review_json = review_json[0] if review_json else {}
+
                 # PDF 생성 (JSON 데이터 전달)
                 pdf_title = f"Code Review: {rn} ({short_id})"
                 

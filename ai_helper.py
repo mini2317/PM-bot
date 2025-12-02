@@ -115,6 +115,9 @@ class AIHelper:
             res_clean = re.sub(r'```json\s*', '', res, flags=re.I)
             res_clean = re.sub(r'```\s*', '', res_clean)
             parsed = json.loads(res_clean.strip())
+
+            if isinstance(parsed, list):
+                parsed = parsed[0] if parsed else {}
             
             logger.debug(f"Extracted Data: {json.dumps(parsed, indent=2, ensure_ascii=False)}")
             return parsed
