@@ -132,7 +132,7 @@ class AssistantCog(commands.Cog):
         if message.channel.id != assist_channel_id: return
         if message.content.startswith(('!', '/')): return
 
-        # 히스토리 가져오기
+        # 최근 대화 6개 가져오기 (문맥용)
         history = [msg async for msg in message.channel.history(limit=6)]
         chat_context = []
         for msg in reversed(history):
@@ -140,22 +140,19 @@ class AssistantCog(commands.Cog):
             chat_context.append(f"[{role}] {msg.content}")
 
         async with message.channel.typing():
-            # [Fix] AIHelper.analyze_assistant_input의 인자 순서에 맞게 데이터 전달
             active_tasks = self.bot.db.get_active_tasks_simple(message.guild.id)
             projects = self.bot.db.get_all_projects()
-            guild_id = message.guild.id
-
-            result = await self.bot.ai.analyze_assistant_input(chat_context, active_tasks, projects, guild_id)
+            
+            # [Update] guild_id 인자 전달
+            result = await self.bot.ai.analyze_assistant_input(chat_context, active_tasks, projects, message.guild.id)
             
             action = result.get('action', 'none')
             comment = result.get('comment', '...')
             question = result.get('question')
 
+            # [Fix] 'none' 액션이면 아무 반응도 하지 않음 (잡담 무시)
             if action == 'none':
-                # 답변이 있는 경우에만 출력
-                if comment and comment != '...':
-                    await message.reply(f"🤖 {comment}")
-                return
+                return 
 
             async def execute_callback(interaction, data):
                 if action == 'ask_user':
@@ -168,25 +165,18 @@ class AssistantCog(commands.Cog):
             if action == 'ask_user':
                 await message.reply(f"🤖 {question}")
             else:
-                # 상세 정보 포맷팅
+                # 상세 정보
                 details = ""
-                if action == 'add_task':
-                    details = f"📌 **할 일 추가**: {result.get('content')}\n📁 **프로젝트**: {result.get('project', '일반')}"
-                elif action == 'create_project':
-                    details = f"🆕 **프로젝트 생성**: {result.get('name')}"
-                elif action == 'complete_task':
-                    details = f"✅ **작업 완료**: #{result.get('task_id')}"
-                elif action == 'assign_task':
-                    details = f"👤 **담당 배정**: #{result.get('task_id')} → {result.get('member_name')}"
-                elif action == 'start_meeting':
-                    details = f"🎙️ **회의 시작**: {result.get('name')}"
-                elif action == 'add_repo':
-                    details = f"🐙 **Github 연결**: {result.get('repo_name')}"
+                if action == 'add_task': details = f"📌 할일: {result.get('content')}\n📁 프로젝트: {result.get('project')}"
+                elif action == 'create_project': details = f"🆕 프로젝트: {result.get('name')}"
+                elif action == 'complete_task': details = f"✅ 완료: #{result.get('task_id')}"
+                elif action == 'assign_task': details = f"👤 배정: #{result.get('task_id')} → {result.get('member_name')}"
+                elif action == 'start_meeting': details = f"🎙️ 회의: {result.get('name')}"
+                elif action == 'add_repo': details = f"🐙 Github: {result.get('repo_name')}"
                 
-                display_msg = f"🤖 **[비서 제안]**\n{comment}\n\n{details}" if details else f"🤖 **[비서 제안]**\n{comment}"
-                
+                display = f"🤖 **[비서 제안]**\n{comment}\n\n{details}" if details else f"🤖 **[비서 제안]**\n{comment}"
                 view = AssistantActionView(result, message.author, execute_callback)
-                await message.reply(f"{display_msg}\n\n이대로 실행할까요?", view=view)
-
+                await message.reply(f"{display}\n\n실행할까요?", view=view)
+                
 async def setup(bot):
     await bot.add_cog(AssistantCog(bot))
