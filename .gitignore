@@ -5,4 +5,5 @@ src/key/github_key
 src/key/groq_key
 pm_bot.db
 .vscode
+memory.db
 __pycache__
