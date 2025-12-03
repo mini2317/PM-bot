@@ -18,13 +18,14 @@ class AIHelper:
         self.load_config()
         self.load_prompts()
         self.setup_client()
-        self.memory = MemoryService() 
+        self.memory = MemoryService() # 메모리 서비스(RAG)
 
     def load_config(self):
         try:
             with open("src/config.json", "r", encoding="utf-8") as f:
                 self.config = json.load(f)
         except:
+            # [Fix] 기본 모델을 최신 지원 모델로 변경
             self.config = {"ai_provider": "gemini", "ai_model": "gemini-1.5-pro", "groq_model": "llama-3.3-70b-versatile"}
 
     def load_prompts(self):
@@ -40,7 +41,7 @@ class AIHelper:
         if self.provider == "gemini" and self.gemini_key:
             genai.configure(api_key=self.gemini_key)
             self.model = genai.GenerativeModel(self.config.get("ai_model", "gemini-1.5-pro"))
-            logger.info(f"Gemini Client Setup Complete. Model: {self.config.get('ai_model', 'gemini-1.5-pro')}")
+            logger.info(f"Gemini Client Setup Complete. Model: {self.config.get('ai_model')}")
         elif self.provider == "groq" and self.groq_key:
             self.client = Groq(api_key=self.groq_key)
             self.groq_model = self.config.get("groq_model", "llama-3.3-70b-versatile")
@@ -135,41 +136,30 @@ class AIHelper:
         logger.info(f"Reviewing code for {repo}...")
         try:
             res = await self.generate_content(prompt, is_json=True)
+            
             res_clean = re.sub(r'```json\s*', '', res, flags=re.I)
             res_clean = re.sub(r'```\s*', '', res_clean)
             parsed = json.loads(res_clean.strip())
-            if isinstance(parsed, list): parsed = parsed[0] if parsed else {}
+            
+            if isinstance(parsed, list):
+                parsed = parsed[0] if parsed else {}
+                
             return parsed
+            
         except Exception as e:
             logger.error(f"Review Failed: {e}")
             return {"summary": "리뷰 생성 실패", "issues": [], "suggestions": [], "score": 0}
 
-    # [UPDATE] Gatekeeper 기준 완화
+    # [UPDATE] Gatekeeper 로그 강화
     async def check_relevance(self, user_msg):
-        """
-        메시지가 비서가 반응해야 할 내용인지 아주 관대하게 판단합니다.
-        """
         if self.provider != "groq" or not hasattr(self, 'client'):
-            return True # Groq 없으면 무조건 통과
-
+            return True 
+        
         prompt = f"""
-        You are a lenient gatekeeper. Determine if the message should be processed by the Project Manager AI.
-
-        [Criteria for YES]
-        - Any mention of work, projects, tasks, meetings, code, or github.
-        - Vague intents like "Let's start", "I have an idea", "What should we do?".
-        - Casual commands, questions, or greetings that imply a request.
-        - **If unsure, ALWAYS reply YES.**
-
-        [Criteria for NO]
-        - Complete gibberish (e.g. "asdf").
-        - Purely personal noise unrelated to any activity.
-
+        Check if the message is related to project management, tasks, meetings, code, github, or bot commands.
         Message: "{user_msg}"
-        
-        Respond with ONLY 'YES' or 'NO'.
+        Reply only 'YES' or 'NO'.
         """
-        
         try:
             def call():
                 return self.client.chat.completions.create(
@@ -179,11 +169,12 @@ class AIHelper:
                 ).choices[0].message.content.strip().upper()
             
             resp = await asyncio.to_thread(call)
-            logger.info(f"Gatekeeper Verdict: {resp} (Msg: {user_msg})")
+            # [Log] 사용자가 한 말과 Gatekeeper의 판단을 함께 출력
+            logger.info(f"[Gatekeeper] Input: '{user_msg}' -> Verdict: {resp}")
             return "YES" in resp
         except Exception as e:
             logger.error(f"Gatekeeper Error: {e}")
-            return True # 에러 시 안전하게 통과
+            return True 
 
     async def analyze_assistant_input(self, chat_context, active_tasks, projects, guild_id):
         tasks_str = json.dumps(active_tasks, ensure_ascii=False)
@@ -196,7 +187,7 @@ class AIHelper:
             query_text = chat_context
             context_msg = str(chat_context)
 
-        # 1. Gatekeeper (기준 완화됨)
+        # 1. Gatekeeper
         is_related = await self.check_relevance(query_text)
         if not is_related:
             return {"action": "none", "comment": ""}
@@ -214,14 +205,16 @@ class AIHelper:
             user_msg=augmented_msg 
         )
 
-        logger.info(f"Analyzing Input...")
+        logger.info(f"Analyzing Input (Context Length: {len(context_msg)})")
         try:
             res = await self.generate_content(prompt, is_json=True)
+            
             res_clean = re.sub(r'```json\s*', '', res, flags=re.I)
             res_clean = re.sub(r'```\s*', '', res_clean)
             parsed_res = json.loads(res_clean.strip())
             
-            if isinstance(parsed_res, list): parsed_res = parsed_res[0] if parsed_res else {}
+            if isinstance(parsed_res, list):
+                parsed_res = parsed_res[0] if parsed_res else {}
             
             logger.info(f"Assistant Thought: {parsed_res.get('comment', 'No comment')} (Action: {parsed_res.get('action')})")
             return parsed_res
