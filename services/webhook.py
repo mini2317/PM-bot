@@ -20,6 +20,7 @@ import asyncio
 import subprocess
 import sys
 import json
+import os # [NEW] 파일 읽기를 위해 추가
 from services.pdf import generate_review_pdf
 from utils import smart_chunk_text
 from ui import EmbedPaginator
@@ -37,6 +38,14 @@ class WebhookServer:
         if hasattr(bot.ai, 'config'):
             self.bot_repo = bot.ai.config.get('bot_repo')
 
+    # [NEW] Github 토큰 로드 헬퍼
+    def _get_github_token(self):
+        try:
+            with open("src/key/github_key", "r", encoding="utf-8") as f:
+                return f.read().strip()
+        except:
+            return None
+
     async def start(self):
         runner = web.AppRunner(self.app)
         await runner.setup()
@@ -45,6 +54,7 @@ class WebhookServer:
         print(f"🌍 Webhook Server running on port {self.port}")
 
     async def get_github_diff(self, url):
+        # (기존 코드와 동일하므로 생략, 그대로 유지하세요)
         print(f"[DEBUG] Diff Request: {url}")
         async with aiohttp.ClientSession() as s:
             async with s.get(url, headers=self.bot.github_headers) as r:
@@ -53,7 +63,6 @@ class WebhookServer:
                     lines = []
                     ignored_files = ['package-lock.json', 'yarn.lock', 'poetry.lock', 'Gemfile.lock']
                     ignored_exts = ('.svg', '.png', '.jpg', '.jpeg', '.gif', '.ico', '.pdf', '.woff', '.ttf')
-
                     for f in d.get('files', []):
                         fn = f['filename']
                         if any(x in fn for x in ignored_files) or fn.endswith(ignored_exts):
@@ -66,7 +75,6 @@ class WebhookServer:
                         if len(patch) > 2500:
                             patch = patch[:2500] + "\n... (Diff truncated due to length) ..."
                         lines.append(f"📄 {fn}\n{patch}\n")
-                    
                     return "\n".join(lines)
                 else:
                     print(f"[DEBUG] Diff Fetch Error: Status {r.status}")
@@ -77,11 +85,7 @@ class WebhookServer:
         if 'repository' not in data: return
         rn = data['repository']['full_name']
         
-        # 1. 알림을 보낼 채널 확인
         cids = self.bot.db.get_repo_channels(rn)
-        
-        # 봇 레포지토리인 경우, 채널 등록이 안 되어 있어도 업데이트는 수행해야 함
-        # 단, 리뷰 알림은 채널이 있어야 가능하므로 체크
         is_self_update = (self.bot_repo and rn == self.bot_repo)
         
         if not cids and not is_self_update:
@@ -97,7 +101,6 @@ class WebhookServer:
             commit_id = c['id']
             short_id = commit_id[:7]
 
-            # Task 자동 완료
             matches = re.findall(r'(?:fix|close|resolve)\s*#(\d+)', message, re.IGNORECASE)
             closed_tasks = []
             for t_id in matches:
@@ -108,7 +111,6 @@ class WebhookServer:
             if closed_tasks:
                 msg_head += f"\n✅ Closed: {', '.join(closed_tasks)}"
             
-            # Diff & AI Review
             api_url = f"https://api.github.com/repos/{rn}/commits/{commit_id}"
             diff_text = await self.get_github_diff(api_url)
             
@@ -117,33 +119,13 @@ class WebhookServer:
 
             if diff_text and len(diff_text.strip()) > 0:
                 review_json = await self.bot.ai.review_code(rn, author, message, diff_text)
-                
-                # List 예외 처리
                 if isinstance(review_json, list):
                     review_json = review_json[0] if review_json else {}
 
-                # PDF
                 pdf_title = f"Code Review: {rn} ({short_id})"
-                # PDF 생성을 위한 텍스트 변환 (JSON -> Text)
-                summary = review_json.get('summary', '')
-                pdf_content_text = f"Author: {author}\nMessage: {message}\n\nSummary: {summary}\n\n"
-                
-                for issue in review_json.get('issues', []):
-                    pdf_content_text += f"[{issue.get('type')}] {issue.get('description')}\n"
-                
-                if review_json.get('suggestions'):
-                    pdf_content_text += "\nSuggestions:\n"
-                    for sug in review_json.get('suggestions', []):
-                        pdf_content_text += f"- {sug}\n"
-
-                # JSON 원본도 같이 넘겨주는 것이 좋지만, 현재 PDF 함수는 Text 기반이므로 변환해서 넘김
-                # 만약 services/pdf.py가 JSON을 받도록 수정되었다면 review_json을 넘기면 됨.
-                # 여기서는 호환성을 위해 텍스트로 변환하여 넘깁니다. (이전 답변에서 PDF 함수가 업데이트 되었으므로 JSON을 넘기는 로직으로 수정 가능)
-                # [수정] generate_review_pdf가 JSON(dict)을 받도록 업데이트 되었으므로 그대로 전달
                 pdf_buffer = await asyncio.to_thread(generate_review_pdf, pdf_title, review_json, web_url)
                 pdf_bytes = pdf_buffer.getvalue()
                 
-                # Embed
                 score = review_json.get('score', 0)
                 summ = review_json.get('summary', '요약 없음')
                 color = discord.Color.green() if score >= 80 else discord.Color.orange() if score >= 50 else discord.Color.red()
@@ -162,7 +144,6 @@ class WebhookServer:
                 main_embed.set_footer(text="상세 내용은 PDF 참조")
                 review_embeds.append(main_embed)
 
-            # Send
             for cid in cids:
                 ch = self.bot.get_channel(cid)
                 if ch:
@@ -180,11 +161,10 @@ class WebhookServer:
                     except Exception as e:
                         print(f"[ERROR] Send fail {cid}: {e}")
 
-        # 3. [기능 1 수정] 봇 자동 업데이트 (리뷰 후 실행)
+        # 3. [기능 1 수정] 봇 자동 업데이트 (인증 정보 포함)
         if is_self_update:
             print(f"🔄 Self-update triggered for {rn}")
             
-            # 재시작 알림
             for cid in cids:
                 ch = self.bot.get_channel(cid)
                 if ch: 
@@ -192,9 +172,19 @@ class WebhookServer:
                     except: pass
             
             try:
+                # [FIX] 토큰을 사용해 인증된 URL 생성
+                token = self._get_github_token()
+                if token:
+                    # https://TOKEN@github.com/USER/REPO.git 형식
+                    auth_url = f"https://{token}@github.com/{rn}.git"
+                    pull_cmd = f"git pull {auth_url}"
+                else:
+                    # 토큰 없으면 기본 pull 시도 (실패 확률 높음)
+                    pull_cmd = "git pull"
+
                 # Git Pull
                 process = await asyncio.create_subprocess_shell(
-                    "git pull",
+                    pull_cmd,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE
                 )
@@ -214,7 +204,9 @@ class WebhookServer:
                     print("♻️ Restarting bot...")
                     sys.exit(0) 
                 else:
-                    print(f"❌ Git Pull Failed: {stderr.decode()}")
+                    # 에러 메시지에 토큰이 노출되지 않도록 주의
+                    err_msg = stderr.decode().replace(token, "***") if token else stderr.decode()
+                    print(f"❌ Git Pull Failed: {err_msg}")
             except Exception as e:
                 print(f"❌ Update Error: {e}")
 
