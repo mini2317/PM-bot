@@ -1,6 +1,6 @@
 {
-  "ai_provider": "gemini", 
+  "ai_provider": "groq", 
   "ai_model": "gemini-2.0-flash-exp",
-  "groq_model": "llama-3.3-70b-versatile",
+  "groq_model": "openai/gpt-oss-120b",
   "bot_repo": "mini2317/PM-bot" 
 }

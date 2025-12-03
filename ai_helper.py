@@ -26,7 +26,7 @@ class AIHelper:
                 self.config = json.load(f)
         except:
             # 기본 설정
-            self.config = {"ai_provider": "gemini", "ai_model": "gemini-1.5-pro", "groq_model": "llama-3.3-70b-versatile"}
+            self.config = {"ai_provider": "gemini", "ai_model": "gemini-2.0-flash-exp", "groq_model": "llama-3.3-70b-versatile"}
 
     def load_prompts(self):
         try:
