@@ -71,52 +71,45 @@ class AssistantCog(commands.Cog):
     async def on_message(self, message):
         if message.author.bot: return
         
-        # [변경] 봇이 멘션되었을 때만 반응 (Trigger)
-        if self.bot.user not in message.mentions:
-            return
+        assist_channel_id = self.bot.db.get_assistant_channel(message.guild.id)
+        if message.channel.id != assist_channel_id: return
+        if message.content.startswith(('!', '/')): return
 
-        # 멘션된 부분 제거하고 순수 텍스트만 추출
-        user_msg = message.content.replace(self.bot.user.mention, "").strip()
-        if not user_msg: return # 멘션만 하고 아무 말 없으면 무시
-
-        # [변경] 최근 대화 문맥(Context) 가져오기 (최근 10개)
-        # 이걸 가져오기 때문에 봇이 내내 듣고 있지 않아도 흐름을 압니다.
-        history = [msg async for msg in message.channel.history(limit=10)]
+        # 히스토리 가져오기
+        history = [msg async for msg in message.channel.history(limit=6)]
         chat_context = []
         for msg in reversed(history):
             role = "Assistant" if msg.author.bot else "User"
-            # 봇 호출 명령어는 제외하고 자연어 흐름만
-            clean_content = msg.content.replace(self.bot.user.mention, "@Bot").strip()
-            chat_context.append(f"[{role}] {clean_content}")
+            chat_context.append(f"[{role}] {msg.content}")
 
         async with message.channel.typing():
             active_tasks = self.bot.db.get_active_tasks_simple(message.guild.id)
             projects = self.bot.db.get_all_projects()
-            
-            # AI 분석 (Gatekeeper 없이 바로 Gemini/Groq 호출)
-            result = await self.bot.ai.analyze_assistant_input(chat_context, active_tasks, projects, message.guild.id)
+            guild_id = message.guild.id
+
+            result = await self.bot.ai.analyze_assistant_input(chat_context, active_tasks, projects, guild_id)
             
             action = result.get('action', 'none')
             comment = result.get('comment', '...')
             question = result.get('question')
 
-            # 단순 질문/잡담이면 바로 답변
             if action == 'none':
-                if comment: await message.reply(f"🤖 {comment}")
+                if comment and comment != '...':
+                    await message.reply(f"🤖 {comment}")
                 return
 
+            # ... (이하 액션 실행 로직 동일) ...
             async def execute_callback(interaction, data):
                 if action == 'ask_user':
                     await self.handle_ask_user(interaction, data)
                 else:
                     handler = self.action_handlers.get(action)
                     if handler: await handler(interaction, data)
-                    else: await interaction.response.send_message("❌ 알 수 없는 액션", ephemeral=True)
+                    else: await interaction.response.send_message(f"❌ 알 수 없는 액션: {action}", ephemeral=True)
 
             if action == 'ask_user':
                 await message.reply(f"🤖 {question}")
             else:
-                # 상세 정보 포맷팅 (기존과 동일)
                 details = ""
                 if action == 'add_task': details = f"📌 **할일**: {result.get('content')}\n📁 **프로젝트**: {result.get('project')}"
                 elif action == 'create_project': details = f"🆕 **프로젝트**: {result.get('name')}"
@@ -124,7 +117,7 @@ class AssistantCog(commands.Cog):
                 elif action == 'assign_task': details = f"👤 **배정**: #{result.get('task_id')} → {result.get('member_name')}"
                 elif action == 'start_meeting': details = f"🎙️ **회의**: {result.get('name')}"
                 elif action == 'add_repo': details = f"🐙 **Github**: {result.get('repo_name')}"
-                elif action == 'status': details = "📊 **현황판 조회**"
+                elif action == 'status': details = f"📊 **현황판 조회**"
 
                 msg_txt = f"🤖 **[비서 제안]**\n{comment}\n\n{details}" if details else f"🤖 **[비서 제안]**\n{comment}"
                 

@@ -79,39 +79,53 @@ class MeetingCog(commands.Cog):
         
         await waiting.delete()
         
-        # 4. 결과 전송 (Embed + PDF)
+        # 요약 Embed 전송
         e = discord.Embed(title=f"✅ 종료: {title}", color=0x2ecc71)
-        e.add_field(name="📄 요약", value=summary_text[:500]+"..." if len(summary_text)>500 else summary_text, inline=False)
+        e.add_field(name="요약", value=summary_text[:500]+"...", inline=False)
+        await ctx.send(embed=e)
+
+        # [스레드 닫기 함수 정의]
+        async def close_thread():
+            try:
+                await ctx.send("🔒 회의가 정리되어 스레드를 보관합니다.")
+                if isinstance(ctx.channel, discord.Thread):
+                    await ctx.channel.edit(archived=True, locked=False)
+            except Exception as e:
+                print(f"스레드 닫기 실패: {e}")
+
+        # 5-Step Flow (역순 호출)
         
-        # 결정 사항이 있으면 Embed에도 표시
-        decisions = ai_summary_json.get('decisions', [])
-        if decisions:
-            dec_text = "\n".join([f"• {d}" for d in decisions[:3]])
-            if len(decisions) > 3: dec_text += "\n..."
-            e.add_field(name="결정 사항", value=dec_text, inline=False)
+        async def step5_final():
+            new_tasks = res.get('new_tasks', [])
+            # [Fix] 할 일이 없으면 바로 스레드 닫기
+            if not new_tasks:
+                await ctx.send("💡 추가된 할 일이 없습니다.")
+                await close_thread() 
+                return
+            
+            # 할 일이 있으면 뷰 생성 (cleanup_callback 전달)
+            await ctx.send("📝 **5. 할 일 등록 및 담당자 배정**", 
+                           view=AutoAssignTaskView(new_tasks, m_id, ctx.author, ctx.guild, self.bot.db, cleanup_callback=close_thread))
 
-        await ctx.send(embed=e, file=pdf_file)
-
-        try:
-            if isinstance(ctx.channel, discord.Thread): await ctx.channel.edit(archived=True, locked=False)
-        except: pass
-
-        # 5-Step Flow (기존 동일)
-        async def step5():
-            if not res.get('new_tasks'): await ctx.send("💡 할일 없음"); return
-            await ctx.send("📝 **5. 할일 등록**", view=AutoAssignTaskView(res['new_tasks'], m_id, ctx.author, ctx.guild, self.bot.db))
         async def step4():
-            if not res.get('assign_roles'): await step5(); return
-            await ctx.send(f"👤 **4. 역할 부여**", view=RoleAssignmentView(res['assign_roles'], ctx.author, step5, ctx.guild))
+            if not res.get('assign_roles'): await step5_final(); return
+            await ctx.send(f"👤 **4. 역할 부여 제안**", view=RoleAssignmentView(res['assign_roles'], ctx.author, step5_final, ctx.guild))
+
         async def step3():
             if not res.get('create_roles'): await step4(); return
-            await ctx.send(f"🛡️ **3. 역할 생성**", view=RoleCreationView(res['create_roles'], ctx.author, step4, ctx.guild))
+            await ctx.send(f"🛡️ **3. 새 역할 생성 제안**", view=RoleCreationView(res['create_roles'], ctx.author, step4, ctx.guild))
+
         async def step2():
-            new_p = {t['project']: t.get('suggested_parent') for t in res.get('new_tasks',[]) if t.get('is_new_project')}
-            if new_p: await ctx.send(f"🆕 **2. 프로젝트 생성**", view=NewProjectView(new_p, res['new_tasks'], ctx.author, step3, ctx.guild.id, self.bot.db))
+            new_p = {}
+            for t in res.get('new_tasks', []):
+                if t.get('is_new_project'): new_p[t['project']] = t.get('suggested_parent')
+            
+            if new_p:
+                await ctx.send(f"🆕 **2. 프로젝트 생성 제안**", view=NewProjectView(new_p, res['new_tasks'], ctx.author, step3, ctx.guild.id, self.bot.db))
             else: await step3()
-        
-        if res.get('updates'): await ctx.send("🔄 **1. 상태 변경**", view=StatusUpdateView(res['updates'], ctx.author, step2, self.bot.db))
+
+        if res.get('updates'):
+            await ctx.send("🔄 **1. 상태 변경 감지**", view=StatusUpdateView(res['updates'], ctx.author, step2, self.bot.db))
         else: await step2()
 
     # 목록 (기존 유지)
