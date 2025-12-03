@@ -73,7 +73,7 @@
   },
   "레포등록": {
     "cat": "🐙 깃헙",
-    "desc": "Github 레포지토리 알림을 연결합니다.\n\n📢 **Github Webhook 설정 방법**:\n1. 레포지토리 **Settings** > **Webhooks** > **Add webhook**\n2. **Payload URL**: `http://34.133.165.49:8080/github-webhook`\n3. **Content type**: `application/json` (필수!)\n4. **Events**: `Just the push event` 선택",
+    "desc": "Github 레포지토리 알림을 연결합니다.\n\n📢 **Github Webhook 설정 방법**:\n1. 레포지토리 **Settings** > **Webhooks** > **Add webhook**\n2. **Payload URL**: `http://34.133.165.49/github-webhook`\n3. **Content type**: `application/json` (필수!)\n4. **Events**: `Just the push event` 선택",
     "usage": "/레포등록 [Owner/Repo]",
     "ex": "/레포등록 google/guava"
   },
@@ -106,11 +106,5 @@
     "desc": "특정 멤버의 봇 사용 권한을 회수합니다.",
     "usage": "/권한삭제 [멤버멘션]",
     "ex": "/권한삭제 @팀원"
-  },
-  "비서설정": {
-    "cat": "🤖 AI 비서",
-    "desc": "현재 채널을 AI 비서 채널로 설정합니다. (대화 내용을 듣고 자동 처리)",
-    "usage": "/비서설정",
-    "ex": "/비서설정"
   }
 }
