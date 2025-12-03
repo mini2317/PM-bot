@@ -1,5 +1,7 @@
 import sys
 import types
+
+# [Patch] Python 3.13+ compatibility
 if sys.version_info >= (3, 13):
     try:
         import audioop
@@ -122,18 +124,23 @@ class WebhookServer:
 
                 # PDF
                 pdf_title = f"Code Review: {rn} ({short_id})"
-                pdf_content = f"Author: {author}\nMessage: {message}\n\n[Review]\n{review_json}" # Raw content fallback
-                
-                # JSON to Text for PDF (간단 변환)
+                # PDF 생성을 위한 텍스트 변환 (JSON -> Text)
                 summary = review_json.get('summary', '')
-                if summary:
-                    pdf_content = f"Author: {author}\nMessage: {message}\n\nSummary: {summary}\n\n"
-                    for issue in review_json.get('issues', []):
-                        pdf_content += f"[{issue.get('type')}] {issue.get('description')}\n"
+                pdf_content_text = f"Author: {author}\nMessage: {message}\n\nSummary: {summary}\n\n"
+                
+                for issue in review_json.get('issues', []):
+                    pdf_content_text += f"[{issue.get('type')}] {issue.get('description')}\n"
+                
+                if review_json.get('suggestions'):
+                    pdf_content_text += "\nSuggestions:\n"
                     for sug in review_json.get('suggestions', []):
-                        pdf_content += f"- {sug}\n"
+                        pdf_content_text += f"- {sug}\n"
 
-                pdf_buffer = await asyncio.to_thread(generate_review_pdf, pdf_title, pdf_content, web_url)
+                # JSON 원본도 같이 넘겨주는 것이 좋지만, 현재 PDF 함수는 Text 기반이므로 변환해서 넘김
+                # 만약 services/pdf.py가 JSON을 받도록 수정되었다면 review_json을 넘기면 됨.
+                # 여기서는 호환성을 위해 텍스트로 변환하여 넘깁니다. (이전 답변에서 PDF 함수가 업데이트 되었으므로 JSON을 넘기는 로직으로 수정 가능)
+                # [수정] generate_review_pdf가 JSON(dict)을 받도록 업데이트 되었으므로 그대로 전달
+                pdf_buffer = await asyncio.to_thread(generate_review_pdf, pdf_title, review_json, web_url)
                 pdf_bytes = pdf_buffer.getvalue()
                 
                 # Embed
