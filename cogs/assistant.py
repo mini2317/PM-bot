@@ -18,7 +18,7 @@ class AssistantCog(commands.Cog):
             'stop_meeting': self.handle_stop_meeting,
             'add_repo': self.handle_add_repo,
             'remove_repo': self.handle_remove_repo,
-            'ask_user': self.handle_ask_user 
+            'ask_user': self.handle_ask_user
         }
 
     async def _refresh_dashboard(self, guild_id):
@@ -121,40 +121,57 @@ class AssistantCog(commands.Cog):
     @is_authorized()
     async def set_assistant(self, ctx):
         self.bot.db.set_assistant_channel(ctx.guild.id, ctx.channel.id)
-        await ctx.send(f"🤖 **AI 비서 활성화!**\n이제 이 채널({ctx.channel.mention})에서 대화의 맥락을 파악하여 업무를 처리합니다.")
+        await ctx.send(f"🤖 **AI 비서 활성화!**\n이제 저를 멘션(@{self.bot.user.name})하고 말씀하시면 도와드릴게요.")
+
+    @commands.hybrid_command(name="비서해제", description="AI 비서 설정을 해제합니다.")
+    @is_authorized()
+    async def unset_assistant(self, ctx):
+        self.bot.db.set_assistant_channel(ctx.guild.id, None)
+        await ctx.send("🤖 **AI 비서가 비활성화되었습니다.**")
 
     @commands.Cog.listener()
     async def on_message(self, message):
         if message.author.bot: return
         
-        # [NEW] 권한 없는 사용자 무시
-        if not self.bot.db.is_authorized(message.author.id):
+        # [FIX] 봇이 멘션되었는지 확인
+        if self.bot.user not in message.mentions:
             return
-        
-        assist_channel_id = self.bot.db.get_assistant_channel(message.guild.id)
-        if message.channel.id != assist_channel_id: return
+
+        # 명령어 실행은 무시 (!, /)
         if message.content.startswith(('!', '/')): return
 
-        # 히스토리 가져오기
-        history = [msg async for msg in message.channel.history(limit=6)]
+        # 비서 채널인지 확인 (비서 채널이 설정되어 있지 않거나, 다른 채널이면 무시)
+        assist_channel_id = self.bot.db.get_assistant_channel(message.guild.id)
+        if not assist_channel_id or message.channel.id != assist_channel_id: 
+            return
+
+        # 멘션 제거 및 내용 추출
+        user_msg = message.content.replace(self.bot.user.mention, "").strip()
+        if not user_msg: return # 멘션만 하고 내용 없으면 무시
+
+        # 히스토리 가져오기 (최근 10개) - 문맥 파악용
+        history = [msg async for msg in message.channel.history(limit=10)]
         chat_context = []
         for msg in reversed(history):
             role = "Assistant" if msg.author.bot else "User"
-            chat_context.append(f"[{role}] {msg.content}")
+            # 봇 호출 명령어는 제외하고 자연어 흐름만
+            clean_content = msg.content.replace(self.bot.user.mention, "@Bot").strip()
+            chat_context.append(f"[{role}] {clean_content}")
 
         async with message.channel.typing():
             active_tasks = self.bot.db.get_active_tasks_simple(message.guild.id)
             projects = self.bot.db.get_all_projects()
-            
-            # guild_id 전달 확인
-            result = await self.bot.ai.analyze_assistant_input(chat_context, active_tasks, projects, message.guild.id)
+            guild_id = message.guild.id
+
+            result = await self.bot.ai.analyze_assistant_input(chat_context, active_tasks, projects, guild_id)
             
             action = result.get('action', 'none')
             comment = result.get('comment', '...')
             question = result.get('question')
 
             if action == 'none':
-                # 잡담 무시 (답장 안함)
+                if comment and comment != '...':
+                    await message.reply(f"🤖 {comment}")
                 return
 
             async def execute_callback(interaction, data):
@@ -168,7 +185,6 @@ class AssistantCog(commands.Cog):
             if action == 'ask_user':
                 await message.reply(f"🤖 {question}")
             else:
-                # 상세 정보 포맷팅
                 details = ""
                 if action == 'add_task': details = f"📌 **할일**: {result.get('content')}\n📁 **프로젝트**: {result.get('project', '일반')}"
                 elif action == 'create_project': details = f"🆕 **프로젝트**: {result.get('name')}"
@@ -176,6 +192,7 @@ class AssistantCog(commands.Cog):
                 elif action == 'assign_task': details = f"👤 **배정**: #{result.get('task_id')} → {result.get('member_name')}"
                 elif action == 'start_meeting': details = f"🎙️ **회의**: {result.get('name')}"
                 elif action == 'add_repo': details = f"🐙 **Github**: {result.get('repo_name')}"
+                elif action == 'status': details = "📊 **현황판 조회**"
                 
                 display_msg = f"🤖 **[비서 제안]**\n{comment}\n\n{details}" if details else f"🤖 **[비서 제안]**\n{comment}"
                 
