@@ -25,13 +25,13 @@ class AssistantCog(commands.Cog):
     async def on_message(self, message):
         if message.author.bot: return
         
-        # 1. 멘션 체크 (핑 날렸을 때만 반응)
+        # 1. 멘션 체크
         if self.bot.user not in message.mentions: return
         
-        # 2. 비서 채널 체크 (설정된 채널이 있다면 거기서만 반응, 아니면 어디서든)
+        # 2. 비서 채널 체크
         assist_channel_id = self.bot.db.get_assistant_channel(message.guild.id)
         if assist_channel_id and message.channel.id != assist_channel_id:
-             return # 설정된 채널이 있으면 그곳 외에는 무시
+             return 
 
         content = message.content.replace(self.bot.user.mention, "").strip()
         if not content: return
@@ -40,10 +40,10 @@ class AssistantCog(commands.Cog):
         history = [msg async for msg in message.channel.history(limit=8)]
         chat_ctx = []
         for msg in reversed(history):
-            # [변경] User/Assistant 대신 실제 닉네임을 사용하여 AI가 화자를 특정할 수 있게 함
-            name = msg.author.display_name
+            role = "Assistant" if msg.author.bot else "User"
             clean = msg.content.replace(self.bot.user.mention, "@Bot").strip()
-            if clean: chat_ctx.append(f"[{name}] {clean}")
+            # 봇의 이전 답변 중 디버그용 스크립트 등은 컨텍스트에서 제외하거나 정제하면 더 좋음
+            if clean: chat_ctx.append(f"[{role}] {clean}")
 
         async with message.channel.typing():
             tasks = self.bot.db.get_active_tasks_simple(message.guild.id)
@@ -52,9 +52,7 @@ class AssistantCog(commands.Cog):
             # 4. AI에게 PML 스크립트 요청
             script = await self.bot.ai.analyze_assistant_input(chat_ctx, tasks, projs, message.guild.id)
             
-            # [변경] 디버그 로그 제거
-
-            # 5. 스크립트 파싱 (SAY, ASK, 그 외 명령)
+            # 5. 스크립트 파싱
             lines = script.split('\n')
             commands_to_run = []
             say_msg = ""
@@ -65,7 +63,6 @@ class AssistantCog(commands.Cog):
                 if not line: continue
                 
                 if line.startswith("SAY"):
-                    # SAY "내용" 파싱
                     parts = line.split(' ', 1)
                     if len(parts) > 1: say_msg = parts[1].strip('"')
                 elif line.startswith("ASK"):
@@ -76,15 +73,16 @@ class AssistantCog(commands.Cog):
             
             # 6. 응답 처리
             
-            # Case A: 질문(ASK)이 있는 경우 - 바로 물어봄
+            # Case A: 질문(ASK)
             if ask_msg:
                 await message.reply(f"🤖 {ask_msg}")
                 return
 
-            # Case B: 실행할 명령이 있는 경우 - 확인 UI
+            # Case B: 실행할 명령이 있는 경우 (UI 수정됨)
             if commands_to_run:
                 clean_script = "\n".join(commands_to_run)
-                display_text = say_msg if say_msg else "다음 작업을 수행할까요?"
+                # SAY 메시지가 없으면 기본 멘트 사용
+                display_text = say_msg if say_msg else "요청하신 작업을 수행할까요?"
                 
                 async def execute_callback(interaction, _):
                     # 인터프리터 실행
@@ -94,12 +92,15 @@ class AssistantCog(commands.Cog):
                     proj_cog = self.bot.get_cog('ProjectCog')
                     if proj_cog: await proj_cog.refresh_dashboard(message.guild.id)
                     
-                    await interaction.message.edit(content=f"✅ **실행 완료**\n```{log}```", view=None)
+                    # 결과 로그도 너무 길면 보기 싫으니 성공 여부만 깔끔하게 표시하거나
+                    # 상세 로그는 3초 뒤 사라지게 하는 등의 UX 개선 가능. 
+                    # 일단은 결과 로그를 간략히 보여줍니다.
+                    await interaction.message.edit(content=f"✅ **처리 완료!**\n(상세: {log[:100]}...)", view=None)
 
-                # 미리보기 제공
-                preview = f"```bash\n{clean_script}\n```"
                 view = AssistantActionView(None, message.author, execute_callback)
-                await message.reply(f"🤖 **[제안]** {display_text}\n\n다음 명령을 실행할까요?\n{preview}", view=view)
+                
+                # [변경] 스크립트(preview) 노출 제거 -> 깔끔한 자연어 제안만 표시
+                await message.reply(f"🤖 {display_text}", view=view)
             
             # Case C: 명령 없이 대답(SAY)만 있는 경우
             elif say_msg:
