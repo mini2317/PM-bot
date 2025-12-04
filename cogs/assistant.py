@@ -25,14 +25,13 @@ class AssistantCog(commands.Cog):
     async def on_message(self, message):
         if message.author.bot: return
         
-        # 1. 멘션 체크
+        # 1. 멘션 체크 (핑 날렸을 때만 반응)
         if self.bot.user not in message.mentions: return
         
-        # 2. 비서 채널 체크 (옵션: 모든 채널 허용하려면 이 부분 삭제 가능)
+        # 2. 비서 채널 체크 (설정된 채널이 있다면 거기서만 반응, 아니면 어디서든)
         assist_channel_id = self.bot.db.get_assistant_channel(message.guild.id)
         if assist_channel_id and message.channel.id != assist_channel_id:
-             # 설정된 채널이 있는데 다른 곳에서 부르면? -> 일단은 반응하도록 허용하거나 무시
-             pass 
+             return # 설정된 채널이 있으면 그곳 외에는 무시
 
         content = message.content.replace(self.bot.user.mention, "").strip()
         if not content: return
@@ -52,6 +51,9 @@ class AssistantCog(commands.Cog):
             # 4. AI에게 PML 스크립트 요청
             script = await self.bot.ai.analyze_assistant_input(chat_ctx, tasks, projs, message.guild.id)
             
+            # [DEBUG] 비서의 생각(생성된 스크립트) 노출
+            await message.channel.send(f"🐛 **[DEBUG] AI Thought (PML Script):**\n```bash\n{script}\n```")
+
             # 5. 스크립트 파싱 (SAY, ASK, 그 외 명령)
             lines = script.split('\n')
             commands_to_run = []
@@ -97,7 +99,7 @@ class AssistantCog(commands.Cog):
                 # 미리보기 제공
                 preview = f"```bash\n{clean_script}\n```"
                 view = AssistantActionView(None, message.author, execute_callback)
-                await message.reply(f"🤖 {display_text}\n{preview}", view=view)
+                await message.reply(f"🤖 **[제안]** {display_text}\n\n다음 명령을 실행할까요?\n{preview}", view=view)
             
             # Case C: 명령 없이 대답(SAY)만 있는 경우
             elif say_msg:
