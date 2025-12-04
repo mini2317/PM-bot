@@ -40,9 +40,10 @@ class AssistantCog(commands.Cog):
         history = [msg async for msg in message.channel.history(limit=8)]
         chat_ctx = []
         for msg in reversed(history):
-            role = "Assistant" if msg.author.bot else "User"
+            # [변경] User/Assistant 대신 실제 닉네임을 사용하여 AI가 화자를 특정할 수 있게 함
+            name = msg.author.display_name
             clean = msg.content.replace(self.bot.user.mention, "@Bot").strip()
-            if clean: chat_ctx.append(f"[{role}] {clean}")
+            if clean: chat_ctx.append(f"[{name}] {clean}")
 
         async with message.channel.typing():
             tasks = self.bot.db.get_active_tasks_simple(message.guild.id)
@@ -51,8 +52,7 @@ class AssistantCog(commands.Cog):
             # 4. AI에게 PML 스크립트 요청
             script = await self.bot.ai.analyze_assistant_input(chat_ctx, tasks, projs, message.guild.id)
             
-            # [DEBUG] 비서의 생각(생성된 스크립트) 노출
-            await message.channel.send(f"🐛 **[DEBUG] AI Thought (PML Script):**\n```bash\n{script}\n```")
+            # [변경] 디버그 로그 제거
 
             # 5. 스크립트 파싱 (SAY, ASK, 그 외 명령)
             lines = script.split('\n')
