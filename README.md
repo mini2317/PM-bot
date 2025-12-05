@@ -5,25 +5,20 @@ Google Gemini 또는 Groq(Llama3)를 기반으로 작동하며, 사용자의 자
 
 # ✨ 주요 기능
 ## 1. 📋 프로젝트 및 할 일 관리
-- **계층형 프로젝트 구조**: 프로젝트 간 상하 관계(부모-자식) 설정 가능.
-- **할 일 관리**: 할 일 등록, 담당자 배정, 진행 상태(TODO/IN_PROGRESS/DONE) 관리.
+- **계층형 프로젝트 구조**: 프로젝트 간 상하 관계 설정 가능.
+- **할 일 관리**: 할 일 등록, 담당자 배정, 진행 상태 관리.
 - **실시간 현황판**: `/현황판설정`을 통해 채널에 고정된 실시간 칸반 보드 제공.
 
 ## 2. 🎙️ AI 스마트 회의록
 - **회의 스레드 자동화**: `/회의 시작` 시 전용 스레드 생성.
 - **자동 요약 및 분석**: 회의 종료 시 AI가 대화 내용을 분석하여 요약, 할 일 추출, 역할 분담 제안을 수행.
 - **인터랙티브 플로우**: AI의 제안을 버튼 클릭으로 승인/수정하여 DB에 반영.
-- **맥락 기억**: 과거 회의 내용을 기억하여 맥락에 맞는 답변 제공.
 
 ## 3. 🐙 GitHub 연동 및 코드 리뷰
-- **웹훅(Webhook) 연동**: Push 발생 시 실시간 알림.
-- **AI 코드 리뷰**: 변경 사항(Diff)을 분석하여 개선점, 버그 위험 등을 리포팅.
+- **웹훅 연동**: Push 발생 시 실시간 알림.
+- **AI 코드 리뷰**: 변경 사항을 분석하여 개선점, 버그 위험 등을 리포팅.
 - **PDF 보고서**: 긴 리뷰 내용은 깔끔한 PDF 파일로 생성하여 첨부.
-- **자동 업데이트**: 봇의 레포지토리에 Push가 발생하면 스스로 git pull 후 재시작.
-
-## 4. 🤖 AI 비서 (Assistant)
-- **자연어 명령**: "로그인 기능 김철수한테 넘겨"라고 말하면 알아서 담당자를 변경.
-- **맥락 파악**: 대화의 흐름을 읽고 필요한 작업을 역제안하거나 질문.
+- **자동 업데이트**: 봇의 레포지토리에 Push가 발생하면 스스로 코드 업데이트 후 재시작.
 
 # 🛠️ 설치 및 실행 방법
 ## 1. 필수 요구 사항
@@ -85,26 +80,32 @@ python main_bot.py
 |**🐙 깃헙**|`/레포등록`|현재 채널에 GitHub 레포지토리 알림 연결|
 ||`/레포삭제`|연결 해제|
 
-# 🚀 배포 (Linux Systemd)
-24시간 무중단 운영을 위한 서비스 등록 예시입니다.
-1. `/etc/systemd/system/pynapse.service` 파일 생성
-```TOML
-[Unit]
-Description=Pynapse Discord Bot
-After=network.target
+# 🛠️ 서버용 설치 방법
 
-[Service]
-User=ubuntu
-WorkingDirectory=/home/ubuntu/PM-bot
-ExecStart=/home/ubuntu/PM-bot/venv/bin/python main_bot.py
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-```
-2. 서비스 시작
+setup.sh 스크립트를 통해 패키지 설치, API 키 설정, 서비스 등록까지 한 번에 완료할 수 있습니다.
+1. 프로젝트 클론
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable pynapse
-sudo systemctl start pynapse
+git clone [https://github.com/YOUR_ID/PM-bot.git](https://github.com/YOUR_ID/PM-bot.git)
+cd PM-bot
 ```
+2. 자동 설치 스크립트 실행
+스크립트가 실행되면 API 키(토큰) 입력을 요청합니다. 미리 준비해주세요.
+- Discord Bot Token
+- Google Gemini API Key
+- Github Personal Access Token
+- Owner ID (관리자 디스코드 ID)
+
+# 실행 권한 부여 및 설치 시작 (관리자 권한 필요 시 비밀번호 입력)
+```bash
+chmod +x setup.sh
+./setup.sh
+```
+
+# ⚙️ 관리 및 유지보수
+setup.sh를 통해 Systemd 서비스로 등록되었으므로, 서버가 재부팅되어도 봇은 자동으로 실행됩니다.
+
+봇 상태 확인: sudo systemctl status pynapse
+
+봇 재시작: sudo systemctl restart pynapse
+
+실시간 로그 확인: journalctl -u pynapse -f
