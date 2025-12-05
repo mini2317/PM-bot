@@ -2,25 +2,31 @@ import io
 import os
 import re
 import html
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, ListFlowable, ListItem
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, ListFlowable, ListItem, HRFlowable
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
+from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib.fonts import addMapping
-from reportlab.lib.enums import TA_JUSTIFY, TA_LEFT
+from reportlab.lib.enums import TA_JUSTIFY, TA_LEFT, TA_CENTER
+
+# --- Configuration ---
+THEME_COLOR = colors.HexColor('#2C3E50') # Dark Blue/Grey
+ACCENT_COLOR = colors.HexColor('#E74C3C') # Red for alerts
+HEADER_BG = colors.HexColor('#ECF0F1') # Light Grey for table headers
+CODE_BG = colors.HexColor('#F8F9F9')   # Very light grey for code
+BORDER_COLOR = colors.HexColor('#BDC3C7')
 
 def register_fonts():
     """한글 폰트(Regular, Bold) 등록 - 경로 자동 탐색"""
-    font_name = 'Helvetica' # 기본값 (한글 미지원 시)
+    font_name = 'Helvetica' # 기본값
     
-    # 폰트가 있을만한 경로 후보들
     regular_candidates = [
-        "src/fonts/NanumGothic-Regular.ttf",            # 바로 아래
-        "src/fonts/Nanum_Gothic/NanumGothic-Regular.ttf" # 폴더 안
+        "src/fonts/NanumGothic-Regular.ttf",            
+        "src/fonts/Nanum_Gothic/NanumGothic-Regular.ttf" 
     ]
-    
     bold_candidates = [
         "src/fonts/NanumGothic-Bold.ttf",
         "src/fonts/Nanum_Gothic/NanumGothic-Bold.ttf"
@@ -37,7 +43,6 @@ def register_fonts():
             pdfmetrics.registerFont(TTFont('NanumGothic', regular_path))
             font_name = 'NanumGothic'
             
-            # Bold 폰트 찾기 (Regular가 있는 경우에만 시도)
             bold_path = None
             for path in bold_candidates:
                 if os.path.exists(path):
@@ -48,84 +53,116 @@ def register_fonts():
                 pdfmetrics.registerFont(TTFont('NanumGothic-Bold', bold_path))
                 addMapping('NanumGothic', 0, 0, 'NanumGothic')
                 addMapping('NanumGothic', 1, 0, 'NanumGothic-Bold')
+                addMapping('NanumGothic', 0, 1, 'NanumGothic-Bold') # Italic hack
+                addMapping('NanumGothic', 1, 1, 'NanumGothic-Bold')
         else:
             print(f"⚠️ 경고: 한글 폰트 파일을 찾을 수 없습니다. (src/fonts/ 폴더 확인 필요)")
-            
     except Exception as e:
         print(f"⚠️ 폰트 등록 실패: {e}")
     
     return font_name
 
-def parse_markdown_to_flowables(text, styles, font_name):
-    """
-    마크다운 텍스트를 ReportLab Flowable 객체 리스트로 변환합니다.
-    """
-    story = []
+def get_stylesheet(font_name):
+    styles = getSampleStyleSheet()
     
-    style_normal = ParagraphStyle(
-        'CustomNormal',
+    # Title
+    styles.add(ParagraphStyle(
+        name='ReportTitle',
+        parent=styles['Title'],
+        fontName=font_name,
+        fontSize=24,
+        leading=30,
+        textColor=THEME_COLOR,
+        spaceAfter=20,
+        alignment=TA_LEFT
+    ))
+
+    # Heading 1
+    styles.add(ParagraphStyle(
+        name='ReportH1',
+        parent=styles['Heading1'],
+        fontName=font_name,
+        fontSize=16,
+        leading=20,
+        textColor=THEME_COLOR,
+        spaceBefore=15,
+        spaceAfter=10,
+        borderPadding=5,
+        borderWidth=0,
+        borderBottomWidth=1,
+        borderColor=BORDER_COLOR
+    ))
+
+    # Normal Text
+    styles.add(ParagraphStyle(
+        name='ReportNormal',
         parent=styles['Normal'],
         fontName=font_name,
         fontSize=10,
         leading=16,
-        spaceAfter=8
-    )
-    
-    # 코드 박스 스타일 (회색 배경 + 한글 폰트)
-    style_code_block = ParagraphStyle(
-        'CodeBlock',
+        spaceAfter=8,
+        alignment=TA_JUSTIFY
+    ))
+
+    # Code Block
+    styles.add(ParagraphStyle(
+        name='ReportCode',
         parent=styles['Normal'],
         fontName=font_name,
         fontSize=9,
         leading=12,
         textColor=colors.black,
-        backColor=colors.whitesmoke,
+        backColor=CODE_BG,
         borderPadding=10,
-        borderColor=colors.lightgrey,
+        borderColor=BORDER_COLOR,
         borderWidth=0.5,
         spaceAfter=15,
-        wordWrap='CJK' # 한글 줄바꿈
-    )
+        leftIndent=5,
+        rightIndent=5,
+        wordWrap='CJK'
+    ))
 
-    # 정규식: 코드 블록(백틱 3개) 기준으로 텍스트 분리
+    # Table Cell
+    styles.add(ParagraphStyle(
+        name='TableCell',
+        parent=styles['Normal'],
+        fontName=font_name,
+        fontSize=9,
+        leading=12,
+        alignment=TA_LEFT
+    ))
+
+    return styles
+
+def parse_markdown_to_flowables(text, styles, font_name):
+    story = []
+    
+    # Regex for code blocks
     pattern = r'```(?:\w+)?\n(.*?)```'
     parts = re.split(pattern, text, flags=re.DOTALL)
     
     for i, part in enumerate(parts):
-        if i % 2 == 1: # Code Block (홀수 인덱스는 코드 블록 내용)
+        if i % 2 == 1: # Code Block
             code_content = part.strip()
             if not code_content: continue
-            
-            # HTML 이스케이프 & 줄바꿈 처리
-            escaped_code = html.escape(code_content).replace('\n', '<br/>')
-            escaped_code = escaped_code.replace(' ', '&nbsp;')
-            
-            story.append(Paragraph(escaped_code, style_code_block))
+            escaped_code = html.escape(code_content).replace('\n', '<br/>').replace(' ', '&nbsp;')
+            story.append(Paragraph(escaped_code, styles['ReportCode']))
         else:
-            # Normal Text (짝수 인덱스는 일반 텍스트)
+            # Normal Text
             lines = part.split('\n')
             for line in lines:
                 if not line.strip(): continue
-                
                 stripped_line = line.lstrip()
-                indent_level = (len(line) - len(stripped_line)) // 2
                 
-                # Header (#)
+                # Headers
                 if stripped_line.startswith('#'):
                     level = len(stripped_line.split(' ')[0])
                     content = stripped_line.lstrip('#').strip()
-                    h_size = 18 - (level*2) if level < 4 else 12
-                    
-                    style_h = ParagraphStyle(
-                        f'Header{level}', parent=styles['Heading1'],
-                        fontName=font_name, fontSize=h_size, leading=h_size+4,
-                        spaceBefore=10, spaceAfter=6, textColor=colors.darkblue
-                    )
-                    # 헤더는 굵게
-                    story.append(Paragraph(f"<b>{html.escape(content)}</b>", style_h))
+                    # Use H1 style for all headers for simplicity, or adjust
+                    story.append(Paragraph(f"<b>{html.escape(content)}</b>", styles['ReportH1']))
                     continue
                 
-                # List (-, *, 1.)
+                # Lists
                 bullet = ""
                 content = ""
                 is_list = False
@@ -136,104 +173,124 @@ def parse_markdown_to_flowables(text, styles, font_name):
                     is_list = True
                     m = re.match(r'^(\d+\.)\s', stripped_line)
                     bullet = m.group(1); content = stripped_line[m.end():]
-                
-                # 인라인 스타일 처리 함수
+
+                # Inline Styles
                 def process_inline(txt):
                     txt = html.escape(txt)
-                    txt = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', txt) # Bold
-                    # 인라인 코드: 배경색 + 같은 폰트(깨짐 방지)
-                    txt = re.sub(r'`([^`]+)`', f'<font backColor="#f0f0f0" name="{font_name}">&nbsp;\\1&nbsp;</font>', txt)
+                    txt = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', txt)
+                    txt = re.sub(r'`([^`]+)`', f'<font backColor="{CODE_BG.hexval()}" name="{font_name}">&nbsp;\\1&nbsp;</font>', txt)
                     return txt
 
                 final_text = process_inline(content if is_list else stripped_line)
                 
                 if is_list:
-                    style_list = ParagraphStyle(
-                        f'ListLvl{indent_level}', parent=styles['Normal'],
-                        fontName=font_name, fontSize=10, leading=16,
-                        leftIndent=15 + (indent_level*15), firstLineIndent=-15, spaceAfter=3
+                    # Custom List Style
+                    list_style = ParagraphStyle(
+                        'ListItem',
+                        parent=styles['ReportNormal'],
+                        leftIndent=20,
+                        firstLineIndent=-15
                     )
-                    story.append(Paragraph(f"{bullet} {final_text}", style_list))
+                    story.append(Paragraph(f"{bullet} {final_text}", list_style))
                 else:
-                    story.append(Paragraph(final_text, style_normal))
+                    story.append(Paragraph(final_text, styles['ReportNormal']))
 
     return story
 
 def generate_review_pdf(title, review_data, link=None):
-    """
-    review_data(JSON Dict 또는 Str)를 받아 구조화된 PDF를 생성합니다.
-    """
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(
-        buffer, pagesize=A4,
-        rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40
+        buffer, 
+        pagesize=A4,
+        rightMargin=20*mm, leftMargin=20*mm, 
+        topMargin=20*mm, bottomMargin=20*mm
     )
     
     font_name = register_fonts()
-    styles = getSampleStyleSheet()
+    styles = get_stylesheet(font_name)
     
-    # 스타일 정의
-    style_title = ParagraphStyle('DocTitle', parent=styles['Title'], fontName=font_name, fontSize=20, leading=24, spaceAfter=20, textColor=colors.darkblue)
-    style_h1 = ParagraphStyle('H1', parent=styles['Heading1'], fontName=font_name, fontSize=14, leading=18, spaceBefore=15, spaceAfter=10, textColor=colors.black)
-    style_normal = ParagraphStyle('NormalText', parent=styles['Normal'], fontName=font_name, fontSize=10, leading=16, spaceAfter=5)
-    style_issue_desc = ParagraphStyle('IssueDesc', parent=styles['Normal'], fontName=font_name, fontSize=9, leading=12)
-
     story = []
     
-    # 제목 처리
+    # Title
     safe_title = html.escape(title)
     if link:
-        safe_title += f' <link href="{link}" color="blue">[Link]</link>'
-    story.append(Paragraph(f"<b>{safe_title}</b>", style_title))
-    story.append(Spacer(1, 10))
+        safe_title += f' <link href="{link}" color="#3498DB">[Link]</link>'
+    story.append(Paragraph(safe_title, styles['ReportTitle']))
+    story.append(HRFlowable(width="100%", thickness=2, color=THEME_COLOR))
+    story.append(Spacer(1, 15))
 
     if isinstance(review_data, dict):
-        # 점수 및 요약
+        # Score
         score = review_data.get('score', 0)
-        score_color = "green" if score >= 80 else "orange" if score >= 50 else "red"
-        story.append(Paragraph(f"<b>Code Quality Score:</b> <font color={score_color} size=12><b>{score}/100</b></font>", style_normal))
+        score_color = "#27AE60" if score >= 80 else "#F39C12" if score >= 50 else "#C0392B"
+        story.append(Paragraph(f"<b>Code Quality Score:</b> <font color={score_color} size=14><b>{score}/100</b></font>", styles['ReportNormal']))
         
+        # Summary
         summary = review_data.get('summary', '')
-        story.append(Paragraph(f"<b>Summary:</b> {html.escape(summary)}", style_normal))
-        story.append(Spacer(1, 15))
+        story.append(Paragraph(f"<b>Summary:</b>", styles['ReportH1']))
+        story.append(Paragraph(html.escape(summary), styles['ReportNormal']))
         
-        # 이슈 테이블
+        # Issues Table
         issues = review_data.get('issues', [])
         if issues:
-            story.append(Paragraph("🚨 Detected Issues", style_h1))
-            data = [['Type', 'Severity', 'File', 'Description']]
+            story.append(Paragraph("🚨 Detected Issues", styles['ReportH1']))
+            
+            table_data = [[
+                Paragraph('<b>Type</b>', styles['TableCell']),
+                Paragraph('<b>Severity</b>', styles['TableCell']),
+                Paragraph('<b>File</b>', styles['TableCell']),
+                Paragraph('<b>Description</b>', styles['TableCell'])
+            ]]
+            
             for issue in issues:
-                # 문자열로 들어올 경우 방어 처리
                 if isinstance(issue, dict):
                     i_type = issue.get('type', '-')
-                    i_severity = issue.get('severity', '-')
+                    i_sev = issue.get('severity', '-')
                     i_file = issue.get('file', '-') or 'General'
                     i_desc = issue.get('description', '')
                 else:
-                    i_type, i_severity, i_file = '-', '-', '-'
+                    i_type, i_sev, i_file = '-', '-', '-'
                     i_desc = str(issue)
 
-                desc_para = Paragraph(html.escape(i_desc), style_issue_desc)
-                data.append([i_type, i_severity, i_file, desc_para])
+                # Severity Color
+                sev_color = colors.black
+                if i_sev == '상': sev_color = colors.red
+                elif i_sev == '중': sev_color = colors.orange
+                
+                table_data.append([
+                    Paragraph(i_type, styles['TableCell']),
+                    Paragraph(f'<font color="{sev_color}">{i_sev}</font>', styles['TableCell']),
+                    Paragraph(i_file, styles['TableCell']),
+                    Paragraph(html.escape(i_desc), styles['TableCell'])
+                ])
             
-            t = Table(data, colWidths=[60, 50, 100, 300])
+            # Column Widths (Total ~170mm)
+            col_widths = [25*mm, 20*mm, 40*mm, 85*mm]
+            t = Table(table_data, colWidths=col_widths, repeatRows=1)
+            
             t.setStyle(TableStyle([
-                ('FONTNAME', (0,0), (-1,-1), font_name),
-                ('BACKGROUND', (0,0), (-1,0), colors.lightgrey),
-                ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
-                ('VALIGN', (0,0), (-1,-1), 'TOP')
+                ('BACKGROUND', (0,0), (-1,0), HEADER_BG),
+                ('TEXTCOLOR', (0,0), (-1,0), THEME_COLOR),
+                ('ALIGN', (0,0), (-1,-1), 'LEFT'),
+                ('VALIGN', (0,0), (-1,-1), 'TOP'),
+                ('GRID', (0,0), (-1,-1), 0.5, BORDER_COLOR),
+                ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.white, colors.whitesmoke]),
+                ('LEFTPADDING', (0,0), (-1,-1), 6),
+                ('RIGHTPADDING', (0,0), (-1,-1), 6),
+                ('TOPPADDING', (0,0), (-1,-1), 6),
+                ('BOTTOMPADDING', (0,0), (-1,-1), 6),
             ]))
             story.append(t)
-            story.append(Spacer(1, 15))
             
-        # 제안 사항
+        # Suggestions
         suggestions = review_data.get('suggestions', [])
         if suggestions:
-            story.append(Paragraph("💡 Suggestions", style_h1))
-            list_items = [ListItem(Paragraph(html.escape(str(s)), style_normal), bulletColor=colors.black, value='circle') for s in suggestions]
-            story.append(ListFlowable(list_items, bulletType='bullet', start='circle', leftIndent=10))
+            story.append(Paragraph("💡 Suggestions", styles['ReportH1']))
+            for s in suggestions:
+                story.append(Paragraph(f"• {html.escape(str(s))}", styles['ReportNormal']))
+                
     else:
-        # 딕셔너리가 아닌 경우 일반 텍스트로 처리
+        # Fallback for text content
         story.extend(parse_markdown_to_flowables(str(review_data), styles, font_name))
 
     doc.build(story)
@@ -241,59 +298,76 @@ def generate_review_pdf(title, review_data, link=None):
     return buffer
 
 def generate_meeting_pdf(meeting_data):
-    """
-    회의록 JSON 데이터를 PDF로 변환합니다.
-    """
     buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40)
+    doc = SimpleDocTemplate(
+        buffer, 
+        pagesize=A4,
+        rightMargin=20*mm, leftMargin=20*mm, 
+        topMargin=20*mm, bottomMargin=20*mm
+    )
+    
     font_name = register_fonts()
-    styles = getSampleStyleSheet()
-
-    # 스타일
-    style_title = ParagraphStyle('M_Title', parent=styles['Title'], fontName=font_name, fontSize=24, leading=30, spaceAfter=20, textColor=colors.darkblue)
-    style_h1 = ParagraphStyle('M_H1', parent=styles['Heading1'], fontName=font_name, fontSize=16, leading=20, spaceBefore=15, spaceAfter=10, textColor=colors.black)
-    style_normal = ParagraphStyle('M_Norm', parent=styles['Normal'], fontName=font_name, fontSize=10, leading=16, spaceAfter=5)
-    style_box = ParagraphStyle('M_Box', parent=styles['Normal'], fontName=font_name, fontSize=10, leading=16, backColor=colors.whitesmoke, borderPadding=10, spaceAfter=10)
-
+    styles = get_stylesheet(font_name)
+    
     story = []
-
-    # 1. 제목 & 날짜
+    
+    # Header
     title = meeting_data.get('title', '회의록')
     date = meeting_data.get('date', '-')
-    story.append(Paragraph(f"<b>{html.escape(title)}</b>", style_title))
-    story.append(Paragraph(f"📅 Date: {date}", style_normal))
+    story.append(Paragraph(html.escape(title), styles['ReportTitle']))
+    story.append(Paragraph(f"<b>Date:</b> {date}", styles['ReportNormal']))
+    story.append(HRFlowable(width="100%", thickness=2, color=THEME_COLOR))
     story.append(Spacer(1, 15))
 
-    # 2. 요약 (박스 스타일)
+    # Summary
     summary = meeting_data.get('summary', '')
     if summary:
-        story.append(Paragraph("📌 Summary", style_h1))
-        story.append(Paragraph(html.escape(summary), style_box))
+        story.append(Paragraph("📌 Summary", styles['ReportH1']))
+        # Box effect
+        story.append(Paragraph(html.escape(summary), styles['ReportCode'])) # Reusing Code style for box effect
 
-    # 3. 안건 (Agenda)
+    # Agenda
     agenda = meeting_data.get('agenda', [])
     if agenda:
-        story.append(Paragraph("📋 Agenda & Discussions", style_h1))
+        story.append(Paragraph("📋 Agenda & Discussions", styles['ReportH1']))
+        
+        table_data = [[Paragraph('<b>Topic</b>', styles['TableCell']), Paragraph('<b>Content</b>', styles['TableCell'])]]
+        
         for item in agenda:
             if isinstance(item, dict):
                 topic = item.get('topic', 'Topic')
                 content = item.get('content', '')
             else:
-                topic = "Agenda Item"
+                topic = "Agenda"
                 content = str(item)
-                
-            story.append(Paragraph(f"<b>• {html.escape(topic)}</b>", style_normal))
-            p = Paragraph(html.escape(content), style_normal)
-            p.leftIndent = 15
-            story.append(p)
-            story.append(Spacer(1, 5))
+            
+            table_data.append([
+                Paragraph(f"<b>{html.escape(topic)}</b>", styles['TableCell']),
+                Paragraph(html.escape(content), styles['TableCell'])
+            ])
+            
+        col_widths = [40*mm, 130*mm]
+        t = Table(table_data, colWidths=col_widths, repeatRows=1)
+        t.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), HEADER_BG),
+            ('TEXTCOLOR', (0,0), (-1,0), THEME_COLOR),
+            ('GRID', (0,0), (-1,-1), 0.5, BORDER_COLOR),
+            ('VALIGN', (0,0), (-1,-1), 'TOP'),
+            ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.white, colors.whitesmoke]),
+            ('LEFTPADDING', (0,0), (-1,-1), 6),
+            ('RIGHTPADDING', (0,0), (-1,-1), 6),
+            ('TOPPADDING', (0,0), (-1,-1), 6),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 6),
+        ]))
+        story.append(t)
 
-    # 4. 결정 사항 (Decisions)
+    # Decisions
     decisions = meeting_data.get('decisions', [])
     if decisions:
-        story.append(Paragraph("✅ Decisions", style_h1))
-        items = [ListItem(Paragraph(html.escape(str(d)), style_normal), bulletColor=colors.black, value='circle') for d in decisions]
-        story.append(ListFlowable(items, bulletType='bullet', start='circle', leftIndent=10))
+        story.append(Paragraph("✅ Key Decisions", styles['ReportH1']))
+        for d in decisions:
+            # Checkbox style bullet
+            story.append(Paragraph(f"☑  {html.escape(str(d))}", styles['ReportNormal']))
 
     doc.build(story)
     buffer.seek(0)
