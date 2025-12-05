@@ -24,35 +24,32 @@ class AssistantCog(commands.Cog):
     @commands.Cog.listener()
     async def on_message(self, message):
         if message.author.bot: return
-        
-        # 1. 멘션 체크
         if self.bot.user not in message.mentions: return
         
-        # 2. 비서 채널 체크
         assist_channel_id = self.bot.db.get_assistant_channel(message.guild.id)
-        if assist_channel_id and message.channel.id != assist_channel_id:
-             return 
+        if assist_channel_id and message.channel.id != assist_channel_id: return
 
         content = message.content.replace(self.bot.user.mention, "").strip()
         if not content: return
 
-        # 3. 컨텍스트 로드
+        # Context Load
         history = [msg async for msg in message.channel.history(limit=8)]
         chat_ctx = []
         for msg in reversed(history):
-            role = "Assistant" if msg.author.bot else "User"
+            name = msg.author.display_name
             clean = msg.content.replace(self.bot.user.mention, "@Bot").strip()
-            # 봇의 이전 답변 중 디버그용 스크립트 등은 컨텍스트에서 제외하거나 정제하면 더 좋음
-            if clean: chat_ctx.append(f"[{role}] {clean}")
+            if clean: chat_ctx.append(f"[{name}] {clean}")
 
         async with message.channel.typing():
             tasks = self.bot.db.get_active_tasks_simple(message.guild.id)
             projs = self.bot.db.get_all_projects()
             
-            # 4. AI에게 PML 스크립트 요청
+            # 1. AI로부터 PML 스크립트 생성
             script = await self.bot.ai.analyze_assistant_input(chat_ctx, tasks, projs, message.guild.id)
             
-            # 5. 스크립트 파싱
+            if "SAY NONE" in script: return # 무시
+
+            # 2. 스크립트 파싱
             lines = script.split('\n')
             commands_to_run = []
             say_msg = ""
@@ -71,18 +68,17 @@ class AssistantCog(commands.Cog):
                 else:
                     commands_to_run.append(line)
             
-            # 6. 응답 처리
+            # 3. 실행 분기
             
-            # Case A: 질문(ASK)
+            # 질문이 있으면 바로 물어봄
             if ask_msg:
                 await message.reply(f"🤖 {ask_msg}")
                 return
 
-            # Case B: 실행할 명령이 있는 경우 (UI 수정됨)
+            # 명령어가 있으면 확인 후 실행
             if commands_to_run:
                 clean_script = "\n".join(commands_to_run)
-                # SAY 메시지가 없으면 기본 멘트 사용
-                display_text = say_msg if say_msg else "요청하신 작업을 수행할까요?"
+                display_text = say_msg if say_msg else "다음 작업을 수행할까요?"
                 
                 async def execute_callback(interaction, _):
                     # 인터프리터 실행
@@ -92,17 +88,19 @@ class AssistantCog(commands.Cog):
                     proj_cog = self.bot.get_cog('ProjectCog')
                     if proj_cog: await proj_cog.refresh_dashboard(message.guild.id)
                     
-                    # 결과 로그도 너무 길면 보기 싫으니 성공 여부만 깔끔하게 표시하거나
-                    # 상세 로그는 3초 뒤 사라지게 하는 등의 UX 개선 가능. 
-                    # 일단은 결과 로그를 간략히 보여줍니다.
-                    await interaction.message.edit(content=f"✅ **처리 완료!**\n(상세: {log[:100]}...)", view=None)
+                    # 로그가 너무 길면 파일로, 짧으면 텍스트로
+                    if len(log) > 1900:
+                        import io
+                        f = discord.File(io.BytesIO(log.encode()), filename="result.txt")
+                        await interaction.message.edit(content=f"✅ **처리 완료**", attachments=[f], view=None)
+                    else:
+                        await interaction.message.edit(content=f"✅ **처리 완료**\n```{log}```", view=None)
 
+                preview = f"```bash\n{clean_script}\n```"
                 view = AssistantActionView(None, message.author, execute_callback)
-                
-                # [변경] 스크립트(preview) 노출 제거 -> 깔끔한 자연어 제안만 표시
-                await message.reply(f"🤖 {display_text}", view=view)
+                await message.reply(f"🤖 {display_text}\n{preview}", view=view)
             
-            # Case C: 명령 없이 대답(SAY)만 있는 경우
+            # 명령어 없이 말만 있으면 대답
             elif say_msg:
                 await message.reply(f"🤖 {say_msg}")
 
