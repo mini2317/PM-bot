@@ -56,7 +56,7 @@ async def on_ready():
     print(f'Logged in as {bot.user}')
     
     # Load Cogs
-    exts = ["cogs.meeting", "cogs.project", "cogs.github", "cogs.admin", "cogs.help", "cogs.assistant"]
+    exts = ["cogs.meeting", "cogs.project", "cogs.github", "cogs.admin", "cogs.help"]
     for e in exts: 
         try: await bot.load_extension(e)
         except Exception as err: print(f"Failed to load {e}: {err}")
