@@ -2,6 +2,7 @@ import google.generativeai as genai
 import json
 import re
 import asyncio
+import os
 import logging
 from groq import Groq
 from services.memory import MemoryService
@@ -16,97 +17,191 @@ class AIHelper:
         self.load_config()
         self.load_prompts()
         self.setup_client()
-        self.memory = MemoryService()
+        self.memory = MemoryService() 
 
     def load_config(self):
         try:
             with open("src/config.json", "r", encoding="utf-8") as f:
                 self.config = json.load(f)
         except:
-            self.config = {"ai_provider": "gemini", "ai_model": "gemini-1.5-pro", "groq_model": "llama-3.3-70b-versatile"}
+            self.config = {"ai_provider": "gemini", "ai_model": "gemini-2.0-flash-exp", "groq_model": "llama-3.3-70b-versatile"}
 
     def load_prompts(self):
         try:
             with open("prompts.json", "r", encoding="utf-8") as f:
                 self.prompts = json.load(f)
-        except: self.prompts = {}
+        except FileNotFoundError:
+            logger.warning("⚠️ prompts.json 파일을 찾을 수 없습니다.")
+            self.prompts = {}
 
     def setup_client(self):
         self.provider = self.config.get("ai_provider", "gemini")
         if self.provider == "gemini" and self.gemini_key:
             genai.configure(api_key=self.gemini_key)
-            self.model = genai.GenerativeModel(self.config.get("ai_model", "gemini-1.5-pro"))
+            self.model = genai.GenerativeModel(self.config.get("ai_model", "gemini-2.0-flash-exp"))
+            logger.info(f"Gemini Client Setup Complete. Model: {self.config.get('ai_model')}")
         elif self.provider == "groq" and self.groq_key:
             self.client = Groq(api_key=self.groq_key)
             self.groq_model = self.config.get("groq_model", "llama-3.3-70b-versatile")
-        else: self.model = None
+            logger.info(f"Groq Client Setup Complete. Model: {self.groq_model}")
+        else:
+            logger.error("❌ AI Provider 설정 오류 또는 키 누락")
+            self.model = None
 
     async def generate_content(self, prompt, is_json=False):
+        """API 호출 통합 함수 (JSON 모드 명시적 처리)"""
         try:
+            logger.debug(f"Generating content... (JSON Mode: {is_json})")
+            
             if self.provider == "gemini":
-                if not self.model: return "Err: No Key"
-                config = genai.types.GenerationConfig(response_mime_type="application/json") if is_json else None
-                res = await asyncio.to_thread(self.model.generate_content, prompt, generation_config=config)
-                return res.text
+                if not self.model: return "❌ 키 설정 필요"
+                
+                config = genai.types.GenerationConfig(
+                    response_mime_type="application/json"
+                ) if is_json else None
+                
+                response = await asyncio.to_thread(
+                    self.model.generate_content, 
+                    prompt, 
+                    generation_config=config
+                )
+                return response.text
+
             elif self.provider == "groq":
-                if not hasattr(self, 'client'): return "Err: No Key"
-                kw = {"messages": [{"role": "user", "content": prompt}], "model": self.groq_model}
-                if is_json: kw["response_format"] = {"type": "json_object"}
-                def call(): return self.client.chat.completions.create(**kw).choices[0].message.content
+                if not hasattr(self, 'client'): return "❌ Groq 키 필요"
+                
+                # [FIX] Groq는 json_object 설정 시 프롬프트에 'json' 단어가 필수임
+                final_prompt = prompt
+                if is_json and "json" not in prompt.lower():
+                    final_prompt += "\n\n(IMPORTANT: Respond in JSON format)"
+                
+                kwargs = {
+                    "messages": [{"role": "user", "content": final_prompt}],
+                    "model": self.groq_model
+                }
+                if is_json:
+                    kwargs["response_format"] = {"type": "json_object"}
+
+                def call():
+                    return self.client.chat.completions.create(**kwargs).choices[0].message.content
+                
                 return await asyncio.to_thread(call)
-        except Exception as e: return f"Err: {e}"
-        return "Err"
+            
+        except Exception as e:
+            logger.error(f"AI Generation Error: {e}", exc_info=True)
+            return f"Error: {e}"
+        
+        return "❌ 설정 오류"
 
     async def generate_meeting_summary(self, transcript):
-        # [UPDATE] 회의록은 JSON 포맷 유지 (PDF 생성용)
-        prompt = self.prompts.get('meeting_summary', "").format(transcript=transcript)
+        template = self.prompts.get('meeting_summary', "Error: Prompt not found")
+        prompt = template.format(transcript=transcript)
+        
+        logger.info("Generating Meeting Summary...")
         try:
             res = await self.generate_content(prompt, is_json=True)
-            return json.loads(res)
-        except: return {"title": "오류", "summary": res}
+            
+            res_clean = re.sub(r'```json\s*', '', res, flags=re.I)
+            res_clean = re.sub(r'```\s*', '', res_clean)
+            parsed = json.loads(res_clean.strip())
+            if isinstance(parsed, list): parsed = parsed[0] if parsed else {}
+            return parsed
+        except Exception as e:
+            logger.error(f"Summary Error: {e}")
+            return {"title": "회의록", "summary": str(res), "agenda": [], "decisions": []}
 
-    async def extract_tasks_and_updates(self, transcript, proj, active, roles, mems):
-        # 회의 분석도 PML로 하면 좋겠지만, MeetingCog 로직을 많이 바꿔야 하므로 일단 JSON 유지하거나
-        # 여기서는 기존 로직 호환성을 위해 JSON 유지.
-        # (사용자 요청은 "비서" 기능이므로 analyze_assistant_input에 집중)
-        tasks_str = json.dumps(active, ensure_ascii=False)
-        prompt = self.prompts.get('extract_tasks', "").format(project_structure_text=proj, tasks_str=tasks_str, server_roles=roles, members=mems, transcript=transcript)
-        try:
-            res = await self.generate_content(prompt, is_json=True)
-            return json.loads(res)
-        except: return {}
+    async def extract_tasks_and_updates(self, transcript, project_structure_text, active_tasks, server_roles, members):
+        tasks_str = json.dumps(active_tasks, ensure_ascii=False)
+        template = self.prompts.get('extract_tasks', "")
+        
+        prompt = template.format(
+            project_structure_text=project_structure_text,
+            tasks_str=tasks_str,
+            server_roles=server_roles,
+            members=members,
+            transcript=transcript
+        )
 
-    async def review_code(self, r, a, m, d):
-        prompt = self.prompts.get('code_review', "").format(repo=r, author=a, msg=m, diff=d[:20000])
+        logger.info("Extracting tasks from meeting...")
         try:
             res = await self.generate_content(prompt, is_json=True)
-            return json.loads(res)
-        except: return {}
+            res_clean = re.sub(r'```json\s*', '', res, flags=re.I)
+            res_clean = re.sub(r'```\s*', '', res_clean)
+            parsed = json.loads(res_clean.strip())
+            return parsed
+        except Exception as e:
+            logger.error(f"Task Extraction Failed: {e}")
+            return {}
+
+    async def review_code(self, repo, author, msg, diff):
+        template = self.prompts.get('code_review', "")
+        prompt = template.format(
+            repo=repo,
+            author=author,
+            msg=msg,
+            diff=diff[:20000]
+        )
+        logger.info(f"Reviewing code for {repo}...")
+        try:
+            res = await self.generate_content(prompt, is_json=True)
+            res_clean = re.sub(r'```json\s*', '', res, flags=re.I)
+            res_clean = re.sub(r'```\s*', '', res_clean)
+            parsed = json.loads(res_clean.strip())
+            if isinstance(parsed, list): parsed = parsed[0] if parsed else {}
+            return parsed
+        except Exception as e:
+            logger.error(f"Review Failed: {e}")
+            return {"summary": "리뷰 생성 실패", "issues": [], "suggestions": [], "score": 0}
 
     async def analyze_assistant_input(self, chat_context, active_tasks, projects, guild_id):
-        """
-        [UPDATE] JSON 대신 PML 스크립트 텍스트 반환
-        """
         tasks_str = json.dumps(active_tasks, ensure_ascii=False)
         projs_str = ", ".join(projects) if projects else "없음"
         
-        ctx_msg = "\n".join(chat_context) if isinstance(chat_context, list) else str(chat_context)
-        
-        # RAG
-        mems = self.memory.query_relevant(ctx_msg, guild_id)
-        mem_ctx = "\n".join([f"- {m}" for m in mems]) if mems else "없음"
+        if isinstance(chat_context, list):
+            query_text = chat_context[-1]
+            context_msg = "\n".join(chat_context)
+        else:
+            query_text = chat_context
+            context_msg = str(chat_context)
 
-        prompt = self.prompts.get('assistant_analysis', "").format(
-            projs_str=projs_str, tasks_str=tasks_str, user_msg=f"{ctx_msg}\n[기억]: {mem_ctx}"
+        is_related = await self.check_relevance(query_text)
+        if not is_related:
+            return {"action": "none", "comment": ""}
+
+        relevant_memories = self.memory.query_relevant(query_text, guild_id)
+        memory_context = "\n".join([f"- {m}" for m in relevant_memories]) if relevant_memories else "없음"
+
+        template = self.prompts.get('assistant_analysis', "")
+        augmented_msg = f"[대화 흐름]:\n{context_msg}\n\n[관련된 과거 기억(RAG)]:\n{memory_context}"
+
+        prompt = template.format(
+            projs_str=projs_str,
+            tasks_str=tasks_str,
+            user_msg=augmented_msg 
         )
 
-        logger.info("Generating PML Script...")
+        logger.info(f"Analyzing Assistant Input...")
         try:
-            # [FIX] is_json=False (스크립트는 텍스트임)
-            script = await self.generate_content(prompt, is_json=False)
-            # 마크다운 코드블록 제거
-            script = script.replace("```pml", "").replace("```", "").strip()
-            return script
+            res = await self.generate_content(prompt, is_json=True)
+            res_clean = re.sub(r'```json\s*', '', res, flags=re.I)
+            res_clean = re.sub(r'```\s*', '', res_clean)
+            parsed_res = json.loads(res_clean.strip())
+            if isinstance(parsed_res, list): parsed_res = parsed_res[0] if parsed_res else {}
+            return parsed_res
         except Exception as e:
-            logger.error(f"Analysis Failed: {e}")
-            return "SAY \"오류가 발생했습니다.\""
+            logger.error(f"Assistant Analysis Failed: {e}")
+            return {"action": "none", "comment": "죄송합니다, 이해하지 못했습니다."}
+
+    # Gatekeeper (이전 코드 유지)
+    async def check_relevance(self, user_msg):
+        if self.provider != "groq" or not hasattr(self, 'client'): return True
+        prompt = f"Check if related to project management/tasks/code/casual chat. Message: '{user_msg}'. Reply YES or NO."
+        try:
+            def call():
+                return self.client.chat.completions.create(
+                    messages=[{"role": "user", "content": prompt}],
+                    model=self.groq_model, max_tokens=5
+                ).choices[0].message.content.strip().upper()
+            resp = await asyncio.to_thread(call)
+            return "YES" in resp
+        except: return True
