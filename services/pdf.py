@@ -88,7 +88,7 @@ def parse_markdown_to_flowables(text, styles, font_name):
     )
 
     # 정규식: 코드 블록(백틱 3개) 기준으로 텍스트 분리
-    pattern = r'```?\w+)?\n(.*?)```'
+    pattern = r'```(?:\w+)?\n(.*?)```'
     parts = re.split(pattern, text, flags=re.DOTALL)
     
     for i, part in enumerate(parts):
