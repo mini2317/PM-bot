@@ -143,9 +143,20 @@ class WebhookServer:
                 if issues:
                     i_txt = ""
                     for i in issues[:3]:
-                        icon = "🔴" if i.get('severity')=='상' else "🟡"
-                        i_txt += f"{icon} **[{i.get('type')}]** {i.get('description')}\n"
-                    if len(issues)>3: i_txt += f"...외 {len(issues)-3}건"
+                        # [Fix] 이슈가 딕셔너리가 아닌 경우 처리
+                        if isinstance(i, dict):
+                            severity = i.get('severity', '중')
+                            i_type = i.get('type', '알림')
+                            desc = i.get('description', '')
+                        else:
+                            severity = '중'
+                            i_type = '알림'
+                            desc = str(i)
+
+                        icon = "🔴" if severity == '상' else "🟡" if severity == '중' else "🟢"
+                        i_txt += f"{icon} **[{i_type}]** {desc}\n"
+                        
+                    if len(issues) > 3: i_txt += f"...외 {len(issues)-3}건"
                     main_embed.add_field(name="🚨 이슈", value=i_txt, inline=False)
                 
                 main_embed.set_footer(text="상세 내용은 PDF 참조")
@@ -167,7 +178,7 @@ class WebhookServer:
                     except Exception as e:
                         print(f"[ERROR] Send fail {cid}: {e}")
 
-        # 2. 강제 업데이트 로직 (에러 메시지 단순화)
+        # 2. 강제 업데이트 로직
         if is_self_update:
             print(f"🔄 Self-update triggered for {rn}")
             
@@ -183,14 +194,12 @@ class WebhookServer:
             remote_url = f"https://{token}@github.com/{rn}.git" if token else "origin"
             
             try:
-                # Fetch
                 code, out, err = await self._run_cmd(f"git fetch {remote_url}")
                 if code != 0:
                     print(f"❌ Fetch Failed: {err}")
                     for ch in notify_channels: await ch.send(f"⚠️ 업데이트 실패 (Fetch): {err[:200]}")
                     return
 
-                # Reset Hard
                 code, out, err = await self._run_cmd("git reset --hard FETCH_HEAD")
                 if code != 0:
                     print(f"❌ Reset Failed: {err}")
@@ -199,7 +208,6 @@ class WebhookServer:
                 
                 print(f"✅ Code Forced Updated: {out}")
 
-                # Pip Install
                 await self._run_cmd(f"{sys.executable} -m pip install -r requirements.txt")
                 
                 print("♻️ Restarting bot...")
@@ -210,7 +218,8 @@ class WebhookServer:
                 for ch in notify_channels: await ch.send(f"⚠️ 업데이트 에러: {str(e)[:200]}")
 
     async def handler(self, request):
-        if request.method == 'GET': return web.Response(text="🟢 Bot Webhook Server OK")
+        if request.method == 'GET':
+            return web.Response(text="🟢 Bot Webhook Server OK")
         try:
             data = await request.json()
             self.bot.loop.create_task(self.process_payload(data))
