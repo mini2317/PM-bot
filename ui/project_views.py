@@ -1,5 +1,6 @@
 import discord
 from discord.ui import View, Button, Select
+from .forms import TaskCreateModal
 
 class StatusUpdateView(View):
     def __init__(self, updates, author, next_callback, db):
@@ -70,6 +71,25 @@ class NewProjectView(View):
         await interaction.message.edit(content="🚫 생성 거절", view=None)
         self.stop()
         if self.next_cb: await self.next_cb()
+
+class DashboardView(View):
+    def __init__(self, bot):
+        super().__init__(timeout=None) # 타임아웃 없음 (계속 작동)
+        self.bot = bot
+
+    @discord.ui.button(label="할 일 추가", style=discord.ButtonStyle.green, emoji="➕", custom_id="dash_add_task")
+    async def add_task(self, interaction: discord.Interaction, button: Button):
+        # 모달 띄우기
+        modal = TaskCreateModal(self.bot.db, interaction.guild.id)
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="새로고침", style=discord.ButtonStyle.grey, emoji="🔄", custom_id="dash_refresh")
+    async def refresh(self, interaction: discord.Interaction, button: Button):
+        # ProjectCog의 refresh_dashboard 호출
+        proj_cog = self.bot.get_cog("ProjectCog")
+        if proj_cog:
+            await proj_cog.refresh_dashboard(interaction.guild.id)
+            await interaction.response.send_message("현황판을 갱신했습니다.", ephemeral=True)
 
 class TaskSelectionView(View):
     def __init__(self, tasks, mid, author, guild_id, db):
