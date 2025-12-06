@@ -18,8 +18,8 @@ echo "📦 2. 시스템 패키지 확인 (python3-venv)..."
 sudo apt-get update
 sudo apt-get install -y python3-venv python3-pip
 
-# 3. Python 가상환경 설정
-echo "🐍 3. 가상환경 설정..."
+# 3. Python 가상환경 설정 (이름: .venv 로 통일)
+echo "🐍 3. 가상환경(.venv) 설정..."
 if [ ! -d ".venv" ]; then
     python3 -m venv .venv
     echo "   - 가상환경 생성 완료"
@@ -37,7 +37,8 @@ echo "📁 5. 디렉토리 구조 및 API 키 설정..."
 mkdir -p src/key
 mkdir -p src/fonts
 
-KEYS=("bot_token" "gemini_key" "github_key" "groq_key")
+KEYS=("bot_token" "gemini_key" "github_key" "groq_key" "owner_id")
+
 for KEY in "${KEYS[@]}"; do
     FILE_PATH="src/key/$KEY"
     if [ ! -f "$FILE_PATH" ]; then
@@ -69,7 +70,7 @@ After=network.target
 [Service]
 User=$CURRENT_USER
 WorkingDirectory=$PROJECT_DIR
-ExecStart=$PROJECT_DIR/venv/bin/python main_bot.py
+ExecStart=$PROJECT_DIR/.venv/bin/python main_bot.py
 Restart=always
 RestartSec=10
 

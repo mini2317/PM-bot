@@ -50,6 +50,21 @@ bot.github_headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "appli
 # 웹훅 서버 인스턴스 생성
 webhook_server = WebhookServer(bot, port=WEBHOOK_PORT, path=WEBHOOK_PATH)
 
+@bot.command(name="sync")
+async def sync_command(ctx):
+    # OWNER_ID가 맞는지 확인 (보안)
+    if OWNER_ID and str(ctx.author.id) != str(OWNER_ID):
+        await ctx.send("🚫 관리자만 사용할 수 있습니다.")
+        return
+
+    await ctx.send("🔄 슬래시 커맨드 동기화를 시작합니다...")
+    try:
+        synced = await bot.tree.sync()
+        await ctx.send(f"✅ **{len(synced)}개**의 명령어가 전역 동기화되었습니다.\n(디스코드 클라이언트를 껐다 켜보세요)")
+        print(f"Synced {len(synced)} commands globally.")
+    except Exception as e:
+        await ctx.send(f"❌ 동기화 실패: {e}")
+
 # [Bot Start]
 @bot.event
 async def on_ready():
