@@ -1,10 +1,22 @@
-.venv
-src/key/bot_token
-src/key/gemini_key
-src/key/github_key
-src/key/groq_key
+# Python
+__pycache__/
+.venv/
+*.pyc
+
+# Database
+*.db
 pm_bot.db
-fonts
-.vscode
 memory.db
-__pycache__
+
+# Secrets
+src/key/
+src/config.json
+.env
+
+# Resources
+src/fonts/*
+!src/fonts/.gitkeep 
+
+# IDE
+.vscode/
+.idea/

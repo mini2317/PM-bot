@@ -13,12 +13,12 @@ sudo chown -R $CURRENT_USER:$CURRENT_USER .
 chmod +x *.sh
 git config --global --add safe.directory $PROJECT_DIR
 
-# 2. 시스템 패키지 업데이트 및 필수 요소 설치
-echo "📦 2. 시스템 패키지 확인 (python3-venv)..."
+# 2. 시스템 패키지 업데이트
+echo "📦 2. 시스템 패키지 확인..."
 sudo apt-get update
 sudo apt-get install -y python3-venv python3-pip
 
-# 3. Python 가상환경 설정 (이름: .venv 로 통일)
+# 3. Python 가상환경 설정
 echo "🐍 3. 가상환경(.venv) 설정..."
 if [ ! -d ".venv" ]; then
     python3 -m venv .venv
@@ -44,13 +44,16 @@ for KEY in "${KEYS[@]}"; do
     if [ ! -f "$FILE_PATH" ]; then
         echo ""
         echo "👉 '$KEY' 파일이 없습니다."
-        read -p "   값을 입력하세요 (입력하지 않고 Enter시 건너뜀): " KEY_VALUE
+        if [ "$KEY" == "owner_id" ]; then
+            echo "   (관리자 디스코드 유저 ID 숫자)"
+        fi
+        read -p "   값을 입력하세요 (Enter시 건너뜀): " KEY_VALUE
         
         if [ -n "$KEY_VALUE" ]; then
             echo "$KEY_VALUE" > "$FILE_PATH"
             echo "   ✅ $KEY 저장 완료"
         else
-            echo "   ⚠️ $KEY 생성 건너뜀 (나중에 직접 생성해야 합니다)"
+            echo "   ⚠️ $KEY 생성 건너뜀"
         fi
     else
         echo "   ✅ $KEY 이미 존재함"
@@ -58,7 +61,7 @@ for KEY in "${KEYS[@]}"; do
 done
 echo ""
 
-# 6. Systemd 서비스 자동 생성 및 등록
+# 6. Systemd 서비스 등록
 echo "⚙️ 6. Systemd 서비스 등록..."
 SERVICE_FILE="pynapse.service"
 
@@ -85,9 +88,7 @@ sudo systemctl enable pynapse
 sudo systemctl restart pynapse
 
 echo "----------------------------------------------------"
-echo "✅ 모든 설정이 완료되었습니다!"
+echo "✅ 설정 완료!"
 echo "----------------------------------------------------"
-echo "⚠️  [확인] src/fonts/NanumGothic-Regular.ttf 파일이 있는지 확인하세요."
 echo ""
-echo "👀 봇 상태 확인: sudo systemctl status pynapse"
-echo "📝 로그 확인: journalctl -u pynapse -f"
+echo "👀 상태 확인: sudo systemctl status pynapse"
