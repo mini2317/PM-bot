@@ -6,8 +6,7 @@ attrs==25.4.0
 cachetools==6.2.2
 certifi==2025.11.12
 charset-normalizer==3.4.4
-discord==2.3.2
-discord.py==2.4.0
+discord.py>=2.4.0
 distro==1.9.0
 frozenlist==1.8.0
 google-ai-generativelanguage==0.6.6
