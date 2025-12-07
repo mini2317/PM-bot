@@ -42,7 +42,7 @@ class MeetingTaskView(View):
     @discord.ui.button(label="등록 및 배정 완료", style=discord.ButtonStyle.green, emoji="✅")
     async def save(self, interaction, button):
         if not self.selected_indices:
-            await interaction.followup.send("⚠️ 항목을 선택해주세요.", ephemeral=True)
+            await interaction.followup.send("⚠️ 항목을 선택해주세요. 등록할 작업이 없다면 '건너뛰기'를 눌러주세요.", ephemeral=True)
             return
             
         results = []
@@ -62,18 +62,27 @@ class MeetingTaskView(View):
             # 프로젝트에 연결된 포럼 채널이 있으면 게시글 생성
             if project_data and project_data.get('forum_channel_id'):
                 forum = self.guild.get_channel(project_data['forum_channel_id'])
-                if forum and isinstance(forum, discord.ForumChannel):
-                    todo_tag = next((tag for tag in forum.available_tags if tag.name == "TODO"), None)
-                    tags = [todo_tag] if todo_tag else []
+                if forum:
                     try:
-                        th = await forum.create_thread(
-                            name=content[:100],
-                            content=f"📝 **회의 도출 작업**\n{content}\n\n🔗 **출처**: 회의록 #{self.mid}\n👤 **생성자**: {self.author.mention}",
-                            applied_tags=tags
-                        )
-                        thread_id = th.thread.id
-                        message_id = th.message.id
-                        forum_link = " 🔗"
+                        # ForumChannel인 경우
+                        if isinstance(forum, discord.ForumChannel):
+                            todo_tag = next((tag for tag in forum.available_tags if tag.name == "TODO"), None)
+                            tags = [todo_tag] if todo_tag else []
+                            th = await forum.create_thread(
+                                name=content[:100],
+                                content=f"📝 **회의 도출 작업**\n{content}\n\n🔗 **출처**: 회의록 #{self.mid}\n👤 **생성자**: {self.author.mention}",
+                                applied_tags=tags
+                            )
+                            thread_id = th.thread.id
+                            message_id = th.message.id
+                            forum_link = " 🔗"
+                        # TextChannel인 경우
+                        elif isinstance(forum, discord.TextChannel):
+                            msg = await forum.send(f"📝 **[TODO]** {content}\n🔗 회의록 #{self.mid}\n👤 {self.author.mention}")
+                            th = await msg.create_thread(name=content[:100])
+                            thread_id = th.id
+                            message_id = msg.id
+                            forum_link = " 🔗"
                     except Exception as e:
                         print(f"포럼 생성 실패: {e}")
 
@@ -91,7 +100,7 @@ class MeetingTaskView(View):
                         # 스레드에도 멘션
                         if thread_id:
                             try:
-                                th_ch = self.guild.get_thread(thread_id)
+                                th_ch = self.guild.get_thread(thread_id) or await self.guild.fetch_channel(thread_id)
                                 if th_ch: await th_ch.send(f"👤 **담당자 지정**: {target.mention}")
                             except: pass
 
@@ -106,12 +115,18 @@ class MeetingTaskView(View):
 
         if self.cleanup_callback: await self.cleanup_callback()
 
+    # [NEW] 건너뛰기 버튼 추가
+    @discord.ui.button(label="건너뛰기 (등록 안함)", style=discord.ButtonStyle.grey, emoji="⏭️")
+    async def skip(self, interaction, button):
+        await interaction.message.edit(content="➡️ 할 일 등록을 건너뛰었습니다.", view=None)
+        self.stop()
+        if self.cleanup_callback: await self.cleanup_callback()
+
 
 class MeetingCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         # meeting_buffer: {channel_id: {name, messages, jump_url}}
-        # 포럼 스레드인 경우 channel_id가 스레드 ID가 됨
         self.meeting_buffer = {} 
 
     @commands.Cog.listener()
@@ -141,13 +156,13 @@ class MeetingCog(commands.Cog):
         # [NEW] 현재 카테고리 내 '회의-보드' 포럼 찾기
         if ctx.channel.category:
             meeting_forum = discord.utils.get(ctx.channel.category.channels, name="🎙️ 회의-보드")
+            
+            # 포럼 채널인 경우
             if meeting_forum and isinstance(meeting_forum, discord.ForumChannel):
                 try:
-                    # 진행중 태그 찾기
                     wip_tag = next((t for t in meeting_forum.available_tags if t.name == "진행중"), None)
                     tags = [wip_tag] if wip_tag else []
                     
-                    # 포럼 게시글 생성
                     thread_with_msg = await meeting_forum.create_thread(
                         name=f"🎙️ {name}",
                         content=f"회의가 시작되었습니다.\n주최자: {ctx.author.mention}",
@@ -157,6 +172,14 @@ class MeetingCog(commands.Cog):
                     is_forum_post = True
                 except Exception as e:
                     print(f"포럼 회의 생성 실패: {e}")
+            
+            # 텍스트 채널인 경우 (백업용)
+            elif meeting_forum and isinstance(meeting_forum, discord.TextChannel):
+                 try:
+                    msg = await meeting_forum.send(f"🎙️ **{name}** 회의 시작\n주최자: {ctx.author.mention}")
+                    target_thread = await msg.create_thread(name=f"🎙️ {name}")
+                    is_forum_post = True
+                 except: pass
 
         # 포럼이 없거나 실패하면 현재 채널에서 스레드 생성 (기존 방식)
         if not target_thread:
@@ -214,12 +237,14 @@ class MeetingCog(commands.Cog):
         roles = ", ".join([r.name for r in ctx.guild.roles if not r.is_default()])
         mems = ", ".join([m.display_name for m in ctx.guild.members if not m.bot])
 
+        # [변경] 5단계 프로세스 제거 -> 할 일 추출만 수행
         res = await self.bot.ai.extract_tasks_and_updates(txt, ", ".join(projs), active, roles, mems)
+        new_tasks = res.get('new_tasks', [])
         
         await waiting.delete()
         
         e = discord.Embed(title=f"✅ 종료: {title}", color=0x2ecc71)
-        e.add_field(name="요약", value=summary_text[:500]+"...", inline=False)
+        e.add_field(name="요약", value=summary_text[:500]+"..." if len(summary_text)>500 else summary_text, inline=False)
         decisions = full_result.get('decisions', [])
         if decisions:
             e.add_field(name="결정 사항", value="\n".join([f"• {d}" for d in decisions[:3]]), inline=False)
@@ -229,52 +254,26 @@ class MeetingCog(commands.Cog):
         # 스레드/포스트 정리 함수
         async def close_thread():
             try:
-                if isinstance(ctx.channel, discord.Thread):
-                    # 포럼 게시글인 경우 태그 변경 (진행중 -> 종료)
-                    if isinstance(ctx.channel.parent, discord.ForumChannel):
-                        done_tag = next((t for t in ctx.channel.parent.available_tags if t.name == "종료"), None)
-                        if done_tag: await ctx.channel.edit(applied_tags=[done_tag], archived=True, locked=False)
-                        else: await ctx.channel.edit(archived=True, locked=False)
-                    else:
-                        # 일반 스레드
+                # 포럼 게시글인 경우 태그 변경 (진행중 -> 종료)
+                if isinstance(ctx.channel, discord.Thread) and isinstance(ctx.channel.parent, discord.ForumChannel):
+                    done_tag = next((t for t in ctx.channel.parent.available_tags if t.name == "종료"), None)
+                    if done_tag: await ctx.channel.edit(applied_tags=[done_tag], archived=True, locked=False)
+                    else: await ctx.channel.edit(archived=True, locked=False)
+                else:
+                    # 일반 스레드
+                    if isinstance(ctx.channel, discord.Thread):
                         await ctx.channel.edit(archived=True, locked=False)
             except: pass
 
-        # 5-Step Flow
-        async def step5_final():
-            new_tasks = res.get('new_tasks', [])
-            if not new_tasks:
-                await ctx.send("💡 추가된 할 일이 없습니다.")
-                await close_thread()
-                return
-            # [변경] MeetingTaskView 사용 (포럼 게시글 생성 로직 포함)
+        # [변경] 단순화된 플로우: 할 일 등록 -> 스레드 닫기
+        if new_tasks:
+            # 할 일이 있으면 선택 뷰 표시 (완료 시 close_thread 호출)
             view = MeetingTaskView(new_tasks, m_id, ctx.author, ctx.guild, self.bot.db, cleanup_callback=close_thread)
-            await ctx.send("📝 **5. 할 일 등록 및 담당자 배정**", view=view)
-
-        async def step4():
-            assigns = res.get('assign_roles', [])
-            if not assigns: await step5_final(); return
-            await ctx.send(f"👤 **4. 역할 부여 제안 ({len(assigns)}건)**", view=RoleAssignmentView(assigns, ctx.author, step5_final, ctx.guild))
-
-        async def step3():
-            creates = res.get('create_roles', [])
-            if not creates: await step4(); return
-            await ctx.send(f"🛡️ **3. 새 역할 생성 제안: {', '.join(creates)}**", view=RoleCreationView(creates, ctx.author, step4, ctx.guild))
-
-        async def step2():
-            new_tasks = res.get('new_tasks', [])
-            new_p = {}
-            for t in new_tasks:
-                if t.get('is_new_project'): new_p[t['project']] = t.get('suggested_parent')
-            
-            if new_p:
-                desc = "\n".join([f"• **{k}** (상위: {v or '없음'})" for k, v in new_p.items()])
-                await ctx.send(f"🆕 **2. 프로젝트 생성 제안**\n{desc}", view=NewProjectView(new_p, new_tasks, ctx.author, step3, ctx.guild.id, self.bot.db))
-            else: await step3()
-
-        if res.get('updates'):
-            await ctx.send("🔄 **1. 상태 변경 감지**", view=StatusUpdateView(res['updates'], ctx.author, step2, self.bot.db))
-        else: await step2()
+            await ctx.send("📝 **회의 도출 작업 등록**", view=view)
+        else:
+            # 할 일이 없으면 바로 닫기
+            await ctx.send("💡 추가된 할 일이 없습니다.")
+            await close_thread()
 
     @meeting_group.command(name="목록")
     @is_authorized()
