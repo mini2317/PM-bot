@@ -28,14 +28,12 @@ class ProjectCog(commands.Cog):
                 discord.ForumTag(name="IN_PROGRESS", emoji="🔵"),
                 discord.ForumTag(name="DONE", emoji="✅")
             ]
-            print("---")
             forum = await guild.create_forum(
                 name="📌 이슈-보드",
                 category=category,
                 topic=f"[{name}] 프로젝트의 작업 및 이슈 관리",
-                available_tags=meeting_tags
+                available_tags=forum_tags
             )
-            print("---?")
 
             # 4. 회의록 포럼 생성 (변경됨)
             # 회의를 포럼 게시글(Post)로 관리하기 위해 포럼 채널로 생성
@@ -43,13 +41,12 @@ class ProjectCog(commands.Cog):
                 discord.ForumTag(name="진행중", emoji="🎙️"),
                 discord.ForumTag(name="종료", emoji="✅")
             ]
-            meeting_forum = await category.create_forum(
+            meeting_forum = await guild.create_forum(
                 name="🎙️ 회의-보드",
                 category=category,
                 topic=f"[{name}] 회의 기록 및 진행 아카이브",
                 available_tags=meeting_tags
             )
-            print("?")
             # 5. DB 등록
             pid = self.bot.db.create_project(
                 guild_id=guild.id,
@@ -58,7 +55,6 @@ class ProjectCog(commands.Cog):
                 forum_channel_id=forum.id,
                 meeting_channel_id=meeting_forum.id
             )
-            print("!!")
             
             if pid:
                 return True, f"✅ **{name}** 프로젝트 공간 생성 완료!\n- 카테고리: {category.name}\n- 이슈보드: {forum.mention}\n- 회의보드: {meeting_forum.mention}"
