@@ -5,132 +5,70 @@ from discord.ui import View, Select
 import datetime, asyncio
 import json
 import io
-from ui import EmbedPaginator, StatusUpdateView, NewProjectView, RoleCreationView, RoleAssignmentView
+from ui import EmbedPaginator, TaskSelectionView, StatusUpdateView, NewProjectView, RoleCreationView, RoleAssignmentView, AutoAssignTaskView
 from utils import is_authorized, smart_chunk_text
 from services.pdf import generate_meeting_pdf
 
-# [NEW] 회의 전용 할 일 등록 View (포럼 스레드 생성 기능 포함)
+# [할 일 등록 View (기존 유지)]
 class MeetingTaskView(View):
     def __init__(self, tasks, mid, author, guild, db, cleanup_callback=None):
         super().__init__(timeout=300)
-        print(f"[DEBUG] MeetingTaskView initialized for meeting #{mid}")
-        self.tasks = tasks
-        self.mid = mid
-        self.author = author
-        self.guild = guild
-        self.db = db
-        self.cleanup_callback = cleanup_callback
-        self.selected_indices = []
-        
+        self.tasks = tasks; self.mid = mid; self.author = author; self.guild = guild; self.db = db; self.cleanup_callback = cleanup_callback; self.selected_indices = []
         options = []
         for i, t in enumerate(tasks):
-            content = (t.get('content') or '내용 없음')[:40]
-            project = (t.get('project') or '미정')[:15]
-            assignee = (t.get('assignee_hint') or '미정')[:10]
-            label = f"[{project}] {content}"
-            options.append(discord.SelectOption(label=label, description=f"담당: {assignee}", value=str(i)))
-        
-        if len(options) > 25: options = options[:25]
-        
-        self.select = Select(placeholder="등록할 업무 선택", min_values=0, max_values=len(options), options=options)
-        self.select.callback = self.cb
-        self.add_item(self.select)
-
-    async def cb(self, interaction):
-        self.selected_indices = [int(v) for v in self.select.values]
-        await interaction.response.defer()
-
-    @discord.ui.button(label="등록 및 배정 완료", style=discord.ButtonStyle.green, emoji="✅")
-    async def save(self, interaction, button):
-        print(f"[DEBUG] MeetingTaskView save clicked by {interaction.user}")
-        if not self.selected_indices:
-            await interaction.followup.send("⚠️ 항목을 선택해주세요. 등록할 작업이 없다면 '건너뛰기'를 눌러주세요.", ephemeral=True)
-            return
-            
-        results = []
+            c = (t.get('content') or '내용 없음')[:40]
+            p = (t.get('project') or '미정')[:15]
+            a = (t.get('assignee_hint') or '미정')[:10]
+            options.append(discord.SelectOption(label=f"[{p}] {c}", description=f"담당: {a}", value=str(i)))
+        if len(options)>25: options=options[:25]
+        self.select = Select(placeholder="등록할 업무 선택", options=options, min_values=0, max_values=len(options)); self.select.callback=self.cb; self.add_item(self.select)
+    async def cb(self, i): self.selected_indices=[int(v) for v in self.select.values]; await i.response.defer()
+    @discord.ui.button(label="등록 완료", style=discord.ButtonStyle.green, emoji="✅")
+    async def save(self, i, b):
+        if not self.selected_indices: await i.followup.send("⚠️ 선택항목 없음", ephemeral=True); return
+        res = []
         for idx in self.selected_indices:
-            t = self.tasks[idx]
-            p_name = t.get('project', '일반')
-            content = t.get('content', '내용 없음')
-            
-            # 1. 포럼 스레드 생성 로직
-            pid = self.db.get_project_id(self.guild.id, p_name)
-            project_data = self.db.get_project(pid) if pid else None
-            
-            thread_id = None
-            message_id = None
-            forum_link = ""
-
-            # 프로젝트에 연결된 포럼 채널이 있으면 게시글 생성
-            if project_data and project_data.get('forum_channel_id'):
-                forum = self.guild.get_channel(project_data['forum_channel_id'])
-                if forum:
+            t=self.tasks[idx]; pn=t.get('project','일반'); ct=t.get('content','')
+            # 포럼 스레드 생성 (이슈보드)
+            pid = self.db.get_project_id(self.guild.id, pn)
+            pdata = self.db.get_project(pid) if pid else None
+            tid, mid, flink = None, None, ""
+            if pdata and pdata.get('forum_channel_id'):
+                forum = self.guild.get_channel(pdata['forum_channel_id'])
+                if forum and isinstance(forum, discord.ForumChannel):
                     try:
-                        # ForumChannel인 경우
-                        if isinstance(forum, discord.ForumChannel):
-                            todo_tag = next((tag for tag in forum.available_tags if tag.name == "TODO"), None)
-                            tags = [todo_tag] if todo_tag else []
-                            th = await forum.create_thread(
-                                name=content[:100],
-                                content=f"📝 **회의 도출 작업**\n{content}\n\n🔗 **출처**: 회의록 #{self.mid}\n👤 **생성자**: {self.author.mention}",
-                                applied_tags=tags
-                            )
-                            thread_id = th.thread.id
-                            message_id = th.message.id
-                            forum_link = " 🔗"
-                        # TextChannel인 경우
-                        elif isinstance(forum, discord.TextChannel):
-                            msg = await forum.send(f"📝 **[TODO]** {content}\n🔗 회의록 #{self.mid}\n👤 {self.author.mention}")
-                            th = await msg.create_thread(name=content[:100])
-                            thread_id = th.id
-                            message_id = msg.id
-                            forum_link = " 🔗"
-                    except Exception as e:
-                        print(f"[DEBUG] 포럼 생성 실패: {e}")
-
-            # 2. DB 저장
-            tid = self.db.add_task(self.guild.id, p_name, content, self.mid, thread_id=thread_id, message_id=message_id)
-            print(f"[DEBUG] Task saved to DB: TID={tid}")
-            res_str = f"✅ **#{tid}** 등록{forum_link}"
+                        tag = next((x for x in forum.available_tags if x.name=="TODO"), None)
+                        th = await forum.create_thread(name=ct[:100], content=f"📝 **작업**\n{ct}\n\n🔗 회의록 #{self.mid}\n👤 {self.author.mention}", applied_tags=[tag] if tag else [])
+                        tid=th.thread.id; mid=th.message.id; flink=" 🔗"
+                    except: pass
+            db_tid = self.db.add_task(self.guild.id, pn, ct, self.mid, tid, mid)
             
-            # 3. 담당자 배정
+            # 담당자 배정
             hint = t.get('assignee_hint')
+            assign_str = ""
             if hint:
-                target = discord.utils.find(lambda m: hint in m.display_name or hint in m.name, self.guild.members)
-                if target:
-                    if self.db.assign_task(tid, target.id, target.display_name):
-                        res_str += f" → 👤 {target.display_name}"
-                        # 스레드에도 멘션
-                        if thread_id:
-                            try:
-                                th_ch = self.guild.get_thread(thread_id) or await self.guild.fetch_channel(thread_id)
-                                if th_ch: await th_ch.send(f"👤 **담당자 지정**: {target.mention}")
-                            except: pass
+                target = discord.utils.find(lambda m: hint in m.display_name, self.guild.members)
+                if target: 
+                    self.db.assign_task(db_tid, target.id, target.display_name)
+                    assign_str = f" → 👤 {target.display_name}"
+                    if tid: # 스레드에도 알림
+                         try: (await self.guild.fetch_channel(tid)).send(f"👤 담당: {target.mention}")
+                         except: pass
 
-            results.append(res_str)
-            
-        await interaction.message.edit(content="**[처리 결과]**\n" + "\n".join(results), view=None)
-        self.stop()
-        
-        # 현황판 갱신
-        proj_cog = interaction.client.get_cog('ProjectCog')
-        if proj_cog: await proj_cog.refresh_dashboard(self.guild.id)
-
+            res.append(f"✅ **#{db_tid}** 등록{flink}{assign_str}")
+        await i.message.edit(content="**[결과]**\n"+"\n".join(res), view=None); self.stop()
         if self.cleanup_callback: await self.cleanup_callback()
-
-    # [NEW] 건너뛰기 버튼 추가
-    @discord.ui.button(label="건너뛰기 (등록 안함)", style=discord.ButtonStyle.grey, emoji="⏭️")
-    async def skip(self, interaction, button):
-        print(f"[DEBUG] MeetingTaskView skipped by {interaction.user}")
-        await interaction.message.edit(content="➡️ 할 일 등록을 건너뛰었습니다.", view=None)
-        self.stop()
+    @discord.ui.button(label="건너뛰기", style=discord.ButtonStyle.grey, emoji="⏭️")
+    async def skip(self, i, b):
+        await i.message.edit(content="➡️ 건너뜀", view=None);
+        self.stop(); 
         if self.cleanup_callback: await self.cleanup_callback()
 
 
 class MeetingCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        # meeting_buffer: {channel_id: {name, messages, jump_url}}
+        # meeting_buffer: {channel_id: {name, messages, jump_url, starter_msg_id}}
         self.meeting_buffer = {} 
 
     @commands.Cog.listener()
@@ -144,11 +82,10 @@ class MeetingCog(commands.Cog):
     async def meeting_group(self, ctx):
         if ctx.invoked_subcommand is None: await ctx.send_help(ctx.command)
 
-    @meeting_group.command(name="시작", description="회의를 시작합니다. (포럼이 있으면 게시글 생성)")
+    @meeting_group.command(name="시작", description="회의 포럼 게시글을 생성하고 기록을 시작합니다.")
     @app_commands.describe(name="회의 주제")
     @is_authorized()
     async def start_meeting(self, ctx, *, name: str = None):
-        print(f"[DEBUG] start_meeting called by {ctx.author}")
         if ctx.channel.id in self.meeting_buffer: 
             await ctx.send("🔴 이미 진행 중입니다.")
             return
@@ -156,77 +93,72 @@ class MeetingCog(commands.Cog):
         if not name: name = f"{datetime.datetime.now().strftime('%Y-%m-%d')} 회의"
         
         target_thread = None
-        is_forum_post = False
+        start_msg = None
+        is_forum = False
 
-        # [NEW] 현재 카테고리 내 '회의-보드' 포럼 찾기
+        # 1. '회의-보드' 포럼 찾기
         if ctx.channel.category:
             meeting_forum = discord.utils.get(ctx.channel.category.channels, name="🎙️ 회의-보드")
             
-            # 포럼 채널인 경우
             if meeting_forum and isinstance(meeting_forum, discord.ForumChannel):
-                print(f"[DEBUG] Found meeting forum: {meeting_forum.name}")
                 try:
                     wip_tag = next((t for t in meeting_forum.available_tags if t.name == "진행중"), None)
                     tags = [wip_tag] if wip_tag else []
                     
+                    # [게시글 생성] 이것이 곧 회의실
                     thread_with_msg = await meeting_forum.create_thread(
-                        name=f"🎙️ {name}",
-                        content=f"회의가 시작되었습니다.\n주최자: {ctx.author.mention}",
+                        name=f"🎙️ {name} (진행중...)",
+                        content=f"**회의가 시작되었습니다.**\n\n- 주제: {name}\n- 주최자: {ctx.author.mention}\n- 일시: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n🔴 **녹음 중...** (종료하려면 `/회의 종료`를 입력하세요)",
                         applied_tags=tags
                     )
                     target_thread = thread_with_msg.thread
-                    is_forum_post = True
-                    print(f"[DEBUG] Created forum thread: {target_thread.id}")
+                    start_msg = thread_with_msg.message
+                    is_forum = True
                 except Exception as e:
-                    print(f"[DEBUG] 포럼 회의 생성 실패: {e}")
-            
-            # 텍스트 채널인 경우 (백업용)
-            elif meeting_forum and isinstance(meeting_forum, discord.TextChannel):
-                 try:
-                    msg = await meeting_forum.send(f"🎙️ **{name}** 회의 시작\n주최자: {ctx.author.mention}")
-                    target_thread = await msg.create_thread(name=f"🎙️ {name}")
-                    is_forum_post = True
-                    print(f"[DEBUG] Created text thread: {target_thread.id}")
-                 except: pass
+                    print(f"포럼 회의 생성 실패: {e}")
 
-        # 포럼이 없거나 실패하면 현재 채널에서 스레드 생성 (기존 방식)
+        # 2. 포럼 실패 시 일반 스레드
         if not target_thread:
             try:
                 target_thread = await ctx.channel.create_thread(name=f"🎙️ {name}", type=discord.ChannelType.public_thread, auto_archive_duration=60)
-                print(f"[DEBUG] Created local thread: {target_thread.id}")
+                start_msg = await target_thread.send("🔴 **기록 시작**")
             except Exception as e:
-                print(f"[DEBUG] 회의 생성 실패: {e}")
                 await ctx.send(f"❌ 회의 생성 실패: {e}")
                 return
 
-        # 버퍼 등록
-        self.meeting_buffer[target_thread.id] = {'name': name, 'messages': [], 'jump_url': target_thread.jump_url}
+        # 3. 버퍼 등록 (start_msg_id 필수)
+        self.meeting_buffer[target_thread.id] = {
+            'name': name, 
+            'messages': [], 
+            'jump_url': target_thread.jump_url,
+            'start_msg_id': start_msg.id if start_msg else None
+        }
         
-        embed = discord.Embed(title="🎙️ 회의 시작", description=f"{target_thread.mention} 에서 진행합니다.", color=0xe74c3c)
-        if is_forum_post:
-            await ctx.send(embed=embed) # 명령어 친 곳에 알림
-            await target_thread.send("🔴 **기록 시작** (종료 시 `/회의 종료`)")
+        if is_forum:
+            await ctx.send(f"✅ 회의실 생성됨: {target_thread.mention}")
         else:
-            await ctx.send(embed=embed)
-            await target_thread.send("🔴 **기록 시작**")
+            await ctx.send(embed=discord.Embed(title="🎙️ 회의 시작", description=f"{target_thread.mention}", color=0xe74c3c))
 
-    @meeting_group.command(name="종료", description="회의 종료 및 분석")
+    @meeting_group.command(name="종료", description="회의를 종료하고 포럼 글을 업데이트합니다.")
     @is_authorized()
     async def stop_meeting(self, ctx):
-        print(f"[DEBUG] stop_meeting called in {ctx.channel.id}")
         if ctx.channel.id not in self.meeting_buffer:
             await ctx.send("⚠️ 기록 중인 회의 공간이 아닙니다.")
             return
 
         data = self.meeting_buffer.pop(ctx.channel.id)
         raw = data['messages']
-        if not raw: await ctx.send("📝 내용 없음"); return
+        start_msg_id = data.get('start_msg_id')
+
+        if not raw: 
+            await ctx.send("📝 대화 내용이 없어 종료합니다.")
+            if isinstance(ctx.channel, discord.Thread): await ctx.channel.edit(archived=True)
+            return
 
         txt = "".join([f"[Speaker: {m['user']}] {m['content']}\n" for m in raw])
-        waiting = await ctx.send("🤖 AI 분석 중...")
+        waiting = await ctx.send("🤖 AI 분석 및 정리 중...")
 
-        # 1. 요약
-        print("[DEBUG] Requesting meeting summary...")
+        # 1. AI 요약
         full_result = await self.bot.ai.generate_meeting_summary(txt)
         if not isinstance(full_result, dict):
             full_result = {"title": data['name'], "summary": str(full_result), "agenda": [], "decisions": []}
@@ -234,92 +166,101 @@ class MeetingCog(commands.Cog):
         title = full_result.get('title', data['name'])
         summary_text = full_result.get('summary', '요약 없음')
         
+        # 2. DB 저장
         summary_dump = json.dumps(full_result, ensure_ascii=False)
         m_id = self.bot.db.save_meeting(ctx.guild.id, title, ctx.channel.id, summary_dump, data['jump_url'])
-        print(f"[DEBUG] Meeting saved to DB: {m_id}")
 
-        # 2. PDF 생성
+        # 3. PDF 생성
         try:
             pdf_buffer = await asyncio.to_thread(generate_meeting_pdf, full_result)
             pdf_file = discord.File(io.BytesIO(pdf_buffer.getvalue()), filename=f"Meeting_{m_id}.pdf")
-        except Exception as e: 
-            print(f"[DEBUG] PDF Generation Error: {e}")
-            pdf_file = None
+        except: pdf_file = None
 
-        # 3. 분석
-        print("[DEBUG] Extracting tasks...")
+        # 4. 할 일 분석
         projs = [r[1] for r in self.bot.db.get_project_tree(ctx.guild.id)]
         active = self.bot.db.get_active_tasks_simple(ctx.guild.id)
         roles = ", ".join([r.name for r in ctx.guild.roles if not r.is_default()])
         mems = ", ".join([m.display_name for m in ctx.guild.members if not m.bot])
 
-        # [변경] 5단계 프로세스 제거 -> 할 일 추출만 수행
+        # 5단계 프로세스 대신 -> 단순 할 일 추출만 수행
         res = await self.bot.ai.extract_tasks_and_updates(txt, ", ".join(projs), active, roles, mems)
-        new_tasks = res.get('new_tasks', [])
-        print(f"[DEBUG] Tasks extracted: {len(new_tasks)}")
         
         await waiting.delete()
-        
-        e = discord.Embed(title=f"✅ 종료: {title}", color=0x2ecc71)
-        e.add_field(name="요약", value=summary_text[:500]+"..." if len(summary_text)>500 else summary_text, inline=False)
-        decisions = full_result.get('decisions', [])
-        if decisions:
-            e.add_field(name="결정 사항", value="\n".join([f"• {d}" for d in decisions[:3]]), inline=False)
-        
-        await ctx.send(embed=e, file=pdf_file)
 
-        # 스레드/포스트 정리 함수
-        async def close_thread():
+        # 5. [핵심] 포럼 게시글 본문(Starter Message) 수정
+        embed = discord.Embed(title=f"✅ {title}", description=summary_text[:3500], color=0x2ecc71)
+        
+        if full_result.get('decisions'):
+            d_txt = "\n".join([f"• {d}" for d in full_result['decisions']])
+            embed.add_field(name="☑ 결정 사항", value=d_txt[:1000], inline=False)
+            
+        embed.set_footer(text=f"Meeting ID: #{m_id} | 상세 내용은 첨부된 PDF 확인")
+
+        # 본문 수정 시도
+        msg_edited = False
+        if start_msg_id:
             try:
-                print(f"[DEBUG] Closing thread {ctx.channel.id}")
-                # 포럼 게시글인 경우 태그 변경 (진행중 -> 종료)
-                if isinstance(ctx.channel, discord.Thread) and isinstance(ctx.channel.parent, discord.ForumChannel):
+                start_msg = await ctx.channel.fetch_message(start_msg_id)
+                # 첨부파일과 Embed를 교체
+                await start_msg.edit(content="", embed=embed, attachments=[pdf_file] if pdf_file else [])
+                msg_edited = True
+            except Exception as e:
+                print(f"본문 수정 실패: {e}")
+        
+        # 본문 수정 실패 시 새 메시지로 전송
+        if not msg_edited:
+            await ctx.send(embed=embed, file=pdf_file)
+
+        # 6. 스레드(게시글) 닫기 및 태그 변경
+        async def close_thread_logic():
+            try:
+                # 제목 변경
+                new_thread_name = f"✅ {title}"
+                
+                # 포럼인 경우 태그 변경
+                if isinstance(ctx.channel.parent, discord.ForumChannel):
                     done_tag = next((t for t in ctx.channel.parent.available_tags if t.name == "종료"), None)
-                    if done_tag: await ctx.channel.edit(applied_tags=[done_tag], archived=True, locked=False)
-                    else: await ctx.channel.edit(archived=True, locked=False)
+                    tags = [done_tag] if done_tag else []
+                    await ctx.channel.edit(name=new_thread_name, applied_tags=tags, archived=True, locked=False)
                 else:
                     # 일반 스레드
-                    if isinstance(ctx.channel, discord.Thread):
-                        await ctx.channel.edit(archived=True, locked=False)
-            except Exception as e: print(f"[DEBUG] Close thread failed: {e}")
+                    await ctx.channel.edit(name=new_thread_name, archived=True, locked=False)
+            except Exception as e:
+                print(f"스레드 닫기 실패: {e}")
 
-        # [변경] 단순화된 플로우: 할 일 등록 -> 스레드 닫기
+        # 7. 할 일 등록 절차 (없으면 바로 닫기)
+        new_tasks = res.get('new_tasks', [])
         if new_tasks:
-            # 할 일이 있으면 선택 뷰 표시 (완료 시 close_thread 호출)
-            view = MeetingTaskView(new_tasks, m_id, ctx.author, ctx.guild, self.bot.db, cleanup_callback=close_thread)
-            await ctx.send("📝 **회의 도출 작업 등록**", view=view)
+            view = MeetingTaskView(new_tasks, m_id, ctx.author, ctx.guild, self.bot.db, cleanup_callback=close_thread_logic)
+            await ctx.send("📝 **회의에서 도출된 할 일들을 등록할까요?**", view=view)
         else:
-            # 할 일이 없으면 바로 닫기
             await ctx.send("💡 추가된 할 일이 없습니다.")
-            await close_thread()
+            await close_thread_logic()
 
+    # 목록, 조회, 삭제는 기존 유지
     @meeting_group.command(name="목록")
     @is_authorized()
     async def list(self, ctx):
         rows = self.bot.db.get_recent_meetings(ctx.guild.id)
         if not rows: await ctx.send("📭 없음"); return
         e = discord.Embed(title="📂 회의록", color=0xf1c40f)
-        for r in rows: e.add_field(name=f"[{r[0]}] {r[1]}", value=f"📅 {r[2]} | [이동]({r[4]})", inline=False)
+        for r in rows: e.add_field(name=f"[{r[0]}] {r[1]}", value=f"📅 {r[2]} | [바로가기]({r[4]})", inline=False)
         await ctx.send(embed=e)
 
     @meeting_group.command(name="조회")
-    @app_commands.describe(id="ID")
     @is_authorized()
     async def view(self, ctx, id: int):
         row = self.bot.db.get_meeting_detail(id, ctx.guild.id)
         if not row: await ctx.send("❌ 없음"); return
-        
         try:
             meeting_data = json.loads(row[2])
             summary = meeting_data.get('summary', '')
             pdf_buffer = await asyncio.to_thread(generate_meeting_pdf, meeting_data)
             pdf_file = discord.File(io.BytesIO(pdf_buffer.getvalue()), filename=f"Meeting_{id}.pdf")
-            
             e = discord.Embed(title=f"📂 {row[0]}", description=summary[:500], color=0xf1c40f)
             if row[3]: e.add_field(name="링크", value=f"[이동]({row[3]})", inline=False)
             await ctx.send(embed=e, file=pdf_file)
-        except:
-            await ctx.send("❌ 데이터 손상")
+        except: await ctx.send("❌ 데이터 손상")
 
     @meeting_group.command(name="삭제")
     @is_authorized()
