@@ -8,7 +8,6 @@ class ProjectMixin:
         c.execute("SELECT id FROM projects WHERE guild_id=? AND name=?", (guild_id, name))
         if c.fetchone(): conn.close(); return None
         
-        # [UPDATE] 채널 ID들 저장
         c.execute("INSERT INTO projects (guild_id, name, parent_id, created_at, category_id, forum_channel_id, meeting_channel_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
                   (guild_id, name, parent_id, datetime.datetime.now().strftime("%Y-%m-%d"), category_id, forum_channel_id, meeting_channel_id))
         pid = c.lastrowid; conn.commit(); conn.close(); return pid
@@ -18,13 +17,24 @@ class ProjectMixin:
         c.execute("SELECT id FROM projects WHERE guild_id=? AND name=?", (guild_id, name))
         res = c.fetchone(); conn.close(); return res[0] if res else None
     
-    # [NEW] 프로젝트 ID로 상세 정보 조회 (채널 ID 등 필요할 때 사용)
     def get_project(self, project_id):
         conn = sqlite3.connect(self.db_name); c = conn.cursor()
         c.execute("SELECT * FROM projects WHERE id=?", (project_id,))
         res = c.fetchone(); conn.close()
         if res:
-            # 순서: id, guild_id, name, parent_id, created_at, category_id, forum_id, meeting_id
+            return {
+                "id": res[0], "guild_id": res[1], "name": res[2], "parent_id": res[3], 
+                "created_at": res[4], "category_id": res[5], 
+                "forum_channel_id": res[6], "meeting_channel_id": res[7]
+            }
+        return None
+
+    # [NEW] 카테고리 ID로 프로젝트 정보 조회
+    def get_project_by_category(self, category_id):
+        conn = sqlite3.connect(self.db_name); c = conn.cursor()
+        c.execute("SELECT * FROM projects WHERE category_id=?", (category_id,))
+        res = c.fetchone(); conn.close()
+        if res:
             return {
                 "id": res[0], "guild_id": res[1], "name": res[2], "parent_id": res[3], 
                 "created_at": res[4], "category_id": res[5], 
@@ -41,13 +51,10 @@ class ProjectMixin:
 
         conn = sqlite3.connect(self.db_name); c = conn.cursor()
 
-        # 순환 참조 검사
         current_check_id = parent_id
         while current_check_id:
             if current_check_id == child_id:
-                conn.close()
-                return False 
-            
+                conn.close(); return False 
             c.execute("SELECT parent_id FROM projects WHERE id=?", (current_check_id,))
             res = c.fetchone()
             current_check_id = res[0] if res else None
@@ -78,7 +85,6 @@ class ProjectMixin:
 
     # --- Tasks ---
     def add_task(self, guild_id, project_name, content, source_meeting_id=None, thread_id=None, message_id=None):
-        # [UPDATE] thread_id, message_id 인자 추가
         pid = self.get_project_id(guild_id, project_name)
         if not pid: pid = self.create_project(guild_id, project_name)
         
@@ -89,7 +95,6 @@ class ProjectMixin:
 
     def get_tasks(self, guild_id, project_name=None):
         conn = sqlite3.connect(self.db_name); c = conn.cursor()
-        # [UPDATE] thread_id, message_id select
         query = """
             SELECT t.task_id, p.name, t.content, t.assignee_id, t.assignee_name, t.status, t.thread_id, t.message_id 
             FROM tasks t 
@@ -97,11 +102,9 @@ class ProjectMixin:
             WHERE t.guild_id = ?
         """
         params = [guild_id]
-        
         if project_name:
             query += " AND p.name = ?"
             params.append(project_name)
-            
         query += " ORDER BY t.task_id"
         c.execute(query, tuple(params)); res = c.fetchall(); conn.close(); return res
 
@@ -121,11 +124,9 @@ class ProjectMixin:
         c.execute("UPDATE tasks SET assignee_id=?, assignee_name=? WHERE task_id=?", (aid, an, tid))
         res = c.rowcount > 0; conn.commit(); conn.close(); return res
 
-    # [NEW] 태스크 ID로 상세 정보 조회
     def get_task(self, tid):
         conn = sqlite3.connect(self.db_name); c = conn.cursor()
         c.execute("SELECT * FROM tasks WHERE task_id=?", (tid,))
-        # columns: task_id, guild_id, project_id, content, assignee_id, assignee_name, status, created_at, source_meeting_id, thread_id, message_id
         res = c.fetchone(); conn.close()
         if res:
              return {
