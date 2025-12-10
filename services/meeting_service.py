@@ -18,13 +18,13 @@ async def process_meeting_result(ctx, bot, data, raw_messages):
     # AI 언어 혼용 방지 시스템 메시지
     system_note = (
         "[System Instruction]\n"
-        "1. **반드시 한국어로만 작성하세요.** (중국어, 영어 등 혼용 금지)\n"
+        "1. **반드시 한국어로만 작성하세요.**\n"
         "2. 화자는 `{Speaker X}` 형식을 그대로 유지하세요.\n"
         "--------------------------------------------------\n"
     )
     final_transcript = system_note + txt
     
-    waiting = await ctx.send("🤖 AI 분석 및 정리 중... (화자 익명화 및 언어 교정)")
+    waiting = await ctx.send("🤖 AI 분석 및 정리 중... (화자 익명화 적용)")
 
     # 2. AI 요약
     full_result = await bot.ai.generate_meeting_summary(final_transcript)
@@ -49,15 +49,14 @@ async def process_meeting_result(ctx, bot, data, raw_messages):
     m_id = bot.db.save_meeting(ctx.guild.id, title, ctx.channel.id, summary_dump, data['jump_url'])
 
     # 4. 파일 생성 (PDF는 제거됨, JSON만 생성)
-    # (만약 PDF 기능이 services/pdf.py에 살아있다면 여기서 호출 가능)
     files_to_send = await _create_result_files(full_result, m_id)
 
     # 5. 할 일 분석
-    # [UPDATE] 필요한 정보만 추출하여 전달
+    # [UPDATE] 멤버 목록 생성
+    mems = ", ".join([m.display_name for m in ctx.guild.members if not m.bot])
     active = bot.db.get_active_tasks_simple(ctx.guild.id)
-    mems = ", ".join([m.display_name for m in ctx.guild.members if not m.bot]) # 멤버 목록 생성
     
-    # [FIX] 인자 업데이트: transcript, project_name, active_tasks, members
+    # [UPDATE] 인자 4개 전달 (transcript, project_name, active_tasks, members)
     res = await bot.ai.extract_tasks_and_updates(final_transcript, project_name, active, mems)
     
     await waiting.delete()
@@ -105,17 +104,13 @@ async def process_meeting_result(ctx, bot, data, raw_messages):
 def _anonymize_transcript(raw_messages):
     user_map = {} 
     reverse_map = {} 
-    speaker_idx = 0
+    speaker_idx = 1
     anon_transcript = ""
     
     for msg in raw_messages:
         real_name = msg['user']
         if real_name not in user_map:
-            # {Speaker A} 형식 사용
-            if speaker_idx < 26: suffix = chr(65 + speaker_idx) 
-            else: suffix = str(speaker_idx + 1)
-            anon_name = f"{{Speaker {suffix}}}"
-            
+            anon_name = f"{{Speaker {chr(64 + speaker_idx)}}}" if speaker_idx <= 26 else f"{{Speaker {speaker_idx}}}"
             user_map[real_name] = anon_name
             reverse_map[anon_name] = real_name
             speaker_idx += 1
@@ -142,12 +137,7 @@ def _restore_names_in_json(data, reverse_map):
 
 async def _create_result_files(full_result, m_id):
     files = []
-    # PDF 생성 로직 (필요 시 주석 해제 및 pdf 모듈 import)
-    # try:
-    #     pdf_buffer = await asyncio.to_thread(generate_meeting_pdf, full_result)
-    #     files.append(discord.File(io.BytesIO(pdf_buffer.getvalue()), filename=f"Meeting_{m_id}.pdf"))
-    # except: pass
-
+    # PDF 제거됨
     try:
         json_bytes = json.dumps(full_result, ensure_ascii=False, indent=2).encode('utf-8')
         files.append(discord.File(io.BytesIO(json_bytes), filename=f"Meeting_{m_id}_context.json"))
@@ -167,8 +157,6 @@ def _restore_tasks(tasks, project_name, reverse_map):
             'assignee_hint': real_assignee 
         })
     return restored
-
-# _restore_roles는 사용하지 않으므로 제거하거나 유지해도 무방
 
 async def _update_forum_post(ctx, start_msg_id, embed, files):
     msg_edited = False
